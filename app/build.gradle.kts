@@ -8,6 +8,15 @@ android {
     namespace = "com.shaun.qemuvm"
     compileSdk = 36
 
+    val signingStoreFile = System.getenv("ANDROID_SIGNING_STORE_FILE")
+    val signingStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
+    val signingKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
+    val signingKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
+    val hasReleaseSigning = !signingStoreFile.isNullOrBlank() &&
+        !signingStorePassword.isNullOrBlank() &&
+        !signingKeyAlias.isNullOrBlank() &&
+        !signingKeyPassword.isNullOrBlank()
+
     defaultConfig {
         applicationId = "com.shaun.qemuvm"
         minSdk = 26
@@ -16,13 +25,31 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(signingStoreFile!!)
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
+
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
