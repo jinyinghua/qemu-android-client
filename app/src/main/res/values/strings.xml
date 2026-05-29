@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Qemu VM</string>
+    <string name="notification_channel_name">VM Runtime</string>
+    <string name="notification_channel_description">Persistent runtime notification for QEMU virtual machine hosting.</string>
+    <string name="notification_title_idle">QEMU VM ready</string>
+    <string name="notification_title_running">QEMU VM running</string>
+    <string name="notification_action_start">Start</string>
+    <string name="notification_action_stop">Stop</string>
+</resources>
