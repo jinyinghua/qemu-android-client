@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.shaun.qemuvm"
-    compileSdk = 36
+    compileSdk = 35
 
     val signingStoreFile = System.getenv("ANDROID_SIGNING_STORE_FILE")
     val signingStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
