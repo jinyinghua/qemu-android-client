@@ -18,9 +18,12 @@ import com.shaun.qemuvm.app.QemuVmApplication
 import com.shaun.qemuvm.qemu.QemuCommandBuilder
 import com.shaun.qemuvm.util.NativeBinaryLocator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 class KeepAliveService : LifecycleService() {
 
@@ -83,12 +86,12 @@ class KeepAliveService : LifecycleService() {
         val config = repo.snapshot().vmConfig
 
         if (config.diskImagePath.isBlank() && config.installMediaPath.isBlank()) {
-            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Disk image path or install media path missing") }
+            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Disk image path or install media path missing") }
             stopSelf()
             return
         }
         if (config.firmwarePath.isBlank()) {
-            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Firmware path missing") }
+            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Firmware path missing") }
             stopSelf()
             return
         }
@@ -98,7 +101,7 @@ class KeepAliveService : LifecycleService() {
         collectFileIssue(config.installMediaPath, "install media", inaccessible)
         collectFileIssue(config.firmwarePath, "firmware", inaccessible)
         if (inaccessible.isNotEmpty()) {
-            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Cannot access:\n${inaccessible.joinToString("\n")}") }
+            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Cannot access:\n${inaccessible.joinToString("\n")}") }
             stopSelf()
             return
         }
@@ -106,7 +109,7 @@ class KeepAliveService : LifecycleService() {
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
         val args = QemuCommandBuilder().build(qemuBin, config)
 
-        repo.updateRuntimeState { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
+        updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
 
         acquireWakeLock(config.keepScreenAwake)
 
@@ -116,10 +119,12 @@ class KeepAliveService : LifecycleService() {
             pb.redirectErrorStream(true)
             process = pb.start()
 
+            val currentProcess = process
             val output = withContext(Dispatchers.IO) {
-                process?.inputStream?.bufferedReader()?.readText() ?: ""
+                currentProcess?.inputStream?.bufferedReader()?.readText() ?: ""
             }
-            val exitCode = process?.waitFor() ?: -1
+            val exitCode = currentProcess?.waitFor() ?: -1
+            process = null
 
             val error = if (exitCode != 0) {
                 val trimmed = output.trim()
@@ -132,12 +137,20 @@ class KeepAliveService : LifecycleService() {
                 ""
             }
 
-            repo.updateRuntimeState { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
+            updateRuntimeStateSafely { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
         } catch (e: Exception) {
-            repo.updateRuntimeState { it.copy(isRunning = false, lastError = e.message ?: "Unknown error") }
+            process = null
+            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = e.message ?: "Unknown error") }
         } finally {
             releaseWakeLock()
             stopSelf()
+        }
+    }
+
+    private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
+        val repo = (application as QemuVmApplication).settingsRepository
+        withContext(NonCancellable + Dispatchers.IO) {
+            repo.updateRuntimeState(transform)
         }
     }
 
@@ -153,12 +166,38 @@ class KeepAliveService : LifecycleService() {
     }
 
     private fun stopVm() {
-        process?.destroy()
+        val currentProcess = process
+        var stopExitCode: Int? = null
+
+        if (currentProcess != null) {
+            runCatching {
+                currentProcess.destroy()
+                if (!currentProcess.waitFor(1500, TimeUnit.MILLISECONDS)) {
+                    currentProcess.destroyForcibly()
+                    currentProcess.waitFor(1500, TimeUnit.MILLISECONDS)
+                }
+                if (!currentProcess.isAlive) {
+                    stopExitCode = currentProcess.exitValue()
+                }
+            }
+        }
+
         process = null
         releaseWakeLock()
-        lifecycleScope.launch {
-            val repo = (application as QemuVmApplication).settingsRepository
-            repo.updateRuntimeState { it.copy(isRunning = false) }
+        persistStoppedState(stopExitCode)
+    }
+
+    private fun persistStoppedState(exitCode: Int?) {
+        runCatching {
+            runBlocking(Dispatchers.IO) {
+                val repo = (application as QemuVmApplication).settingsRepository
+                repo.updateRuntimeState {
+                    it.copy(
+                        isRunning = false,
+                        lastExitCode = exitCode ?: it.lastExitCode
+                    )
+                }
+            }
         }
     }
 
