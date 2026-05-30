@@ -23,12 +23,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
 
 class KeepAliveService : LifecycleService() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var process: Process? = null
+    @Volatile private var stoppingRequested = false
 
     override fun onCreate() {
         super.onCreate()
@@ -39,6 +41,7 @@ class KeepAliveService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
 
         if (intent?.action == ACTION_STOP) {
+            stoppingRequested = true
             stopVm()
             stopSelf()
             return START_NOT_STICKY
@@ -82,8 +85,8 @@ class KeepAliveService : LifecycleService() {
     }
 
     private suspend fun startVm() {
-        val repo = (application as QemuVmApplication).settingsRepository
-        val config = repo.snapshot().vmConfig
+        stoppingRequested = false
+        val config = (application as QemuVmApplication).settingsRepository.snapshot().vmConfig
 
         if (config.diskImagePath.isBlank() && config.installMediaPath.isBlank()) {
             updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Disk image path or install media path missing") }
@@ -107,7 +110,8 @@ class KeepAliveService : LifecycleService() {
         }
 
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
-        val args = QemuCommandBuilder().build(qemuBin, config)
+        val firmwareVarsFile = ensureFirmwareVarsImage()
+        val args = QemuCommandBuilder().build(qemuBin, config, firmwareVarsFile.absolutePath)
 
         updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
 
@@ -140,11 +144,26 @@ class KeepAliveService : LifecycleService() {
             updateRuntimeStateSafely { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
         } catch (e: Exception) {
             process = null
-            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = e.message ?: "Unknown error") }
+            val msg = e.message ?: "Unknown error"
+            if (stoppingRequested && msg.contains("interrupted", ignoreCase = true)) {
+                updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "") }
+            } else {
+                updateRuntimeStateSafely { it.copy(isRunning = false, lastError = msg) }
+            }
         } finally {
             releaseWakeLock()
             stopSelf()
         }
+    }
+
+    private fun ensureFirmwareVarsImage(): File {
+        val varsFile = File(filesDir, "qemu-efi-vars.img")
+        if (!varsFile.exists() || varsFile.length() != 64L * 1024L * 1024L) {
+            RandomAccessFile(varsFile, "rw").use { raf ->
+                raf.setLength(64L * 1024L * 1024L)
+            }
+        }
+        return varsFile
     }
 
     private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
@@ -194,7 +213,8 @@ class KeepAliveService : LifecycleService() {
                 repo.updateRuntimeState {
                     it.copy(
                         isRunning = false,
-                        lastExitCode = exitCode ?: it.lastExitCode
+                        lastExitCode = exitCode ?: it.lastExitCode,
+                        lastError = if (stoppingRequested) "" else it.lastError
                     )
                 }
             }

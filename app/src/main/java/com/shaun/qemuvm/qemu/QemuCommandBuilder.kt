@@ -4,7 +4,7 @@ import com.shaun.qemuvm.data.VmConfig
 import java.io.File
 
 class QemuCommandBuilder {
-    fun build(executable: File, config: VmConfig): List<String> {
+    fun build(executable: File, config: VmConfig, firmwareVarsPath: String? = null): List<String> {
         require(config.diskImagePath.isNotBlank() || config.installMediaPath.isNotBlank()) {
             "Disk image path or install media path is required"
         }
@@ -19,13 +19,21 @@ class QemuCommandBuilder {
             "-cpu", "cortex-a72",
             "-m", config.memoryMb.toString(),
             "-smp", config.cpuCores.toString(),
-            "-bios", config.firmwarePath,
             "-netdev", "user,id=net0,hostfwd=tcp::${config.sshHostPort}-:22",
             "-device", "virtio-net-device,netdev=net0",
-            "-display", "none",
+            "-nographic",
             "-serial", "telnet:127.0.0.1:${config.serialPort},server,nowait",
             "-monitor", "telnet:127.0.0.1:${config.monitorPort},server,nowait"
         )
+
+        if (firmwareVarsPath != null) {
+            args += listOf(
+                "-drive", "if=pflash,format=raw,readonly=on,file=${config.firmwarePath}",
+                "-drive", "if=pflash,format=raw,file=$firmwareVarsPath"
+            )
+        } else {
+            args += listOf("-bios", config.firmwarePath)
+        }
 
         if (diskPath.isNotBlank()) {
             val diskLower = diskPath.lowercase()
