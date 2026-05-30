@@ -96,6 +96,7 @@ class KeepAliveService : LifecycleService() {
 
         try {
             val pb = ProcessBuilder(args)
+            NativeBinaryLocator.configureEnvironment(this, pb)
             pb.redirectErrorStream(true)
             process = pb.start()
 

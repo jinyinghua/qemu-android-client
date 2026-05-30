@@ -16,7 +16,7 @@ class SettingsRepository(private val context: Context) {
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
         AppSettings(
             vmConfig = VmConfig(
-                qemuBinaryName = prefs[KEY_QEMU_BINARY] ?: "libqemu-system-aarch64.so",
+                qemuBinaryName = prefs[KEY_QEMU_BINARY] ?: "libqemu.so",
                 memoryMb = prefs[KEY_MEMORY_MB] ?: 2048,
                 cpuCores = prefs[KEY_CPU_CORES] ?: 2,
                 diskImagePath = prefs[KEY_DISK_PATH] ?: "",

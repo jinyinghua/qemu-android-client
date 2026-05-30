@@ -17,15 +17,14 @@ Advanced users, developers, and makers who want a sandbox Linux or x86 environme
 
 ## Requirements
 * Android 8.0 (API 26) or higher.
-* Compatible QEMU compiled binaries (`libqemu-system-aarch64.so`) placed in the `jniLibs` directory.
+* Bundled Android-compatible QEMU binaries and dependencies under `app/src/main/jniLibs/arm64-v8a/`.
 
 ## Getting Started
 
 1. Check out the project and open it in Android Studio.
-2. Ensure you have the corresponding QEMU binaries. (You can compile QEMU for Android via the official `ndk-build` chains or use a prebuilt library).
-3. Place your compiled `libqemu-system-aarch64.so` inside `app/src/main/jniLibs/arm64-v8a/`.
-4. Optionally, push your firmware (`QEMU_EFI.fd`) and OS disk images (`.qcow2` or `.img`) to your device's storage and configure the absolute paths via the Compose UI.
-5. Hit **Start VM** and SSH into it from a terminal at `127.0.0.1:2222`.
+2. Keep the bundled `jniLibs` intact. The app executes `libqemu.so` and `libqemu_img.so` from `nativeLibraryDir` together with their Termux-built dependencies.
+3. Optionally, push your firmware (`QEMU_EFI.fd`) and OS images (`.iso`, `.qcow2`, or `.img`) to your device's storage and configure the absolute paths via the Compose UI.
+4. Hit **Start VM** and SSH into it from a terminal at `127.0.0.1:2222`.
 
 ## Licensing
 This project skeleton and UI logic are released under the MIT License. Note that if you bundle QEMU binaries, you must comply with QEMU's GNU GPLv2 licensing.

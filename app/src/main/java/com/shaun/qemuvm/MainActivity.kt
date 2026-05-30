@@ -135,7 +135,7 @@ fun MainScreen(
                     OutlinedTextField(
                         value = settings.vmConfig.diskImagePath,
                         onValueChange = { onConfigChanged(settings.vmConfig.copy(diskImagePath = it)) },
-                        label = { Text("Disk Image Path (QCOW2/IMG)") },
+                        label = { Text("Disk Image Path (ISO/QCOW2/IMG)") },
                         modifier = Modifier.fillMaxWidth()
                     )
 

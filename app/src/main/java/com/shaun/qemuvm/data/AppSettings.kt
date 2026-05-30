@@ -1,7 +1,7 @@
 package com.shaun.qemuvm.data
 
 data class VmConfig(
-    val qemuBinaryName: String = "libqemu-system-aarch64.so",
+    val qemuBinaryName: String = "libqemu.so",
     val memoryMb: Int = 2048,
     val cpuCores: Int = 2,
     val diskImagePath: String = "",
