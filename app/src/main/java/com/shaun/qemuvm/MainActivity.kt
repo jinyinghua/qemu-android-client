@@ -21,6 +21,7 @@ import com.shaun.qemuvm.data.AppSettings
 import com.shaun.qemuvm.data.VmConfig
 import com.shaun.qemuvm.keepalive.KeepAliveService
 import com.shaun.qemuvm.util.BatteryOptimizationHelper
+import com.shaun.qemuvm.util.StorageAccessHelper
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -51,7 +52,9 @@ class MainActivity : ComponentActivity() {
                         onStartVm = { startVm() },
                         onStopVm = { stopVm() },
                         onRequestBatteryOpt = { requestBatteryOptimization() },
-                        isBatteryOptIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(this)
+                        onRequestStorageAccess = { requestAllFilesAccess() },
+                        isBatteryOptIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(this),
+                        hasStorageAccess = StorageAccessHelper.hasRequiredAccessForSharedStorage()
                     )
                 }
             }
@@ -79,6 +82,14 @@ class MainActivity : ComponentActivity() {
             e.printStackTrace()
         }
     }
+
+    private fun requestAllFilesAccess() {
+        try {
+            startActivity(StorageAccessHelper.buildManageAllFilesIntent(this))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,7 +100,9 @@ fun MainScreen(
     onStartVm: () -> Unit,
     onStopVm: () -> Unit,
     onRequestBatteryOpt: () -> Unit,
-    isBatteryOptIgnored: Boolean
+    onRequestStorageAccess: () -> Unit,
+    isBatteryOptIgnored: Boolean,
+    hasStorageAccess: Boolean
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("QEMU Android Client") }) }
@@ -114,6 +127,16 @@ fun MainScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = onStartVm, enabled = !settings.runtimeState.isRunning) { Text("Start VM") }
                         Button(onClick = onStopVm, enabled = settings.runtimeState.isRunning) { Text("Stop VM") }
+                    }
+                }
+            }
+
+            if (!hasStorageAccess) {
+                Card {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Shared Storage Access", style = MaterialTheme.typography.titleMedium)
+                        Text("The VM image and firmware are under /storage/emulated/0/Download. On modern Android, this app needs \"All files access\" to read them directly.")
+                        Button(onClick = onRequestStorageAccess) { Text("Grant All Files Access") }
                     }
                 }
             }

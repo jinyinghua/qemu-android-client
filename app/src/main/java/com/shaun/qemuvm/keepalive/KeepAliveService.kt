@@ -20,6 +20,7 @@ import com.shaun.qemuvm.util.NativeBinaryLocator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class KeepAliveService : LifecycleService() {
 
@@ -87,6 +88,20 @@ class KeepAliveService : LifecycleService() {
             return
         }
 
+        // Pre-check that files exist and are readable
+        val diskFile = File(config.diskImagePath)
+        val firmwareFile = File(config.firmwarePath)
+        val missing = mutableListOf<String>()
+        if (!diskFile.exists()) missing.add("disk image: ${config.diskImagePath}")
+        else if (!diskFile.canRead()) missing.add("disk image (no read permission): ${config.diskImagePath}")
+        if (!firmwareFile.exists()) missing.add("firmware: ${config.firmwarePath}")
+        else if (!firmwareFile.canRead()) missing.add("firmware (no read permission): ${config.firmwarePath}")
+        if (missing.isNotEmpty()) {
+            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Cannot access:\n${missing.joinToString("\n")}") }
+            stopSelf()
+            return
+        }
+
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
         val args = QemuCommandBuilder().build(qemuBin, config)
         
@@ -100,10 +115,22 @@ class KeepAliveService : LifecycleService() {
             pb.redirectErrorStream(true)
             process = pb.start()
 
-            // In a real app, you'd read process.inputStream here and log it to UI or file.
+            val output = withContext(Dispatchers.IO) {
+                process?.inputStream?.bufferedReader()?.readText() ?: ""
+            }
             val exitCode = process?.waitFor() ?: -1
-            
-            repo.updateRuntimeState { it.copy(isRunning = false, lastExitCode = exitCode) }
+
+            val error = if (exitCode != 0) {
+                val trimmed = output.trim()
+                if (trimmed.isNotBlank()) {
+                    val lines = trimmed.lines().takeLast(20)
+                    lines.joinToString("\n")
+                } else {
+                    "QEMU exited with code $exitCode (no output)"
+                }
+            } else ""
+
+            repo.updateRuntimeState { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
         } catch (e: Exception) {
             repo.updateRuntimeState { it.copy(isRunning = false, lastError = e.message ?: "Unknown error") }
         } finally {
