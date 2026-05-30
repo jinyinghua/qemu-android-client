@@ -110,8 +110,9 @@ class KeepAliveService : LifecycleService() {
         }
 
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
+        val firmwareCodeFile = ensureFirmwareCodeImage(File(config.firmwarePath))
         val firmwareVarsFile = ensureFirmwareVarsImage()
-        val args = QemuCommandBuilder().build(qemuBin, config, firmwareVarsFile.absolutePath)
+        val args = QemuCommandBuilder().build(qemuBin, config, firmwareCodeFile.absolutePath, firmwareVarsFile.absolutePath)
 
         updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
 
@@ -154,6 +155,30 @@ class KeepAliveService : LifecycleService() {
             releaseWakeLock()
             stopSelf()
         }
+    }
+
+    private fun ensureFirmwareCodeImage(sourceFirmware: File): File {
+        val codeFile = File(filesDir, "qemu-efi-code.img")
+        val targetSize = 64L * 1024L * 1024L
+        val needsRefresh = !codeFile.exists() ||
+            codeFile.length() != targetSize ||
+            codeFile.lastModified() < sourceFirmware.lastModified()
+
+        if (needsRefresh) {
+            RandomAccessFile(codeFile, "rw").use { raf ->
+                raf.setLength(targetSize)
+                raf.seek(0)
+                sourceFirmware.inputStream().use { input ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        raf.write(buffer, 0, read)
+                    }
+                }
+            }
+        }
+        return codeFile
     }
 
     private fun ensureFirmwareVarsImage(): File {

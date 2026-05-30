@@ -4,7 +4,12 @@ import com.shaun.qemuvm.data.VmConfig
 import java.io.File
 
 class QemuCommandBuilder {
-    fun build(executable: File, config: VmConfig, firmwareVarsPath: String? = null): List<String> {
+    fun build(
+        executable: File,
+        config: VmConfig,
+        firmwareCodePath: String? = null,
+        firmwareVarsPath: String? = null
+    ): List<String> {
         require(config.diskImagePath.isNotBlank() || config.installMediaPath.isNotBlank()) {
             "Disk image path or install media path is required"
         }
@@ -26,9 +31,9 @@ class QemuCommandBuilder {
             "-monitor", "telnet:127.0.0.1:${config.monitorPort},server,nowait"
         )
 
-        if (firmwareVarsPath != null) {
+        if (firmwareCodePath != null && firmwareVarsPath != null) {
             args += listOf(
-                "-drive", "if=pflash,format=raw,readonly=on,file=${config.firmwarePath}",
+                "-drive", "if=pflash,format=raw,readonly=on,file=$firmwareCodePath",
                 "-drive", "if=pflash,format=raw,file=$firmwareVarsPath"
             )
         } else {
