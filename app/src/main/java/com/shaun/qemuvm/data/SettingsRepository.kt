@@ -20,6 +20,7 @@ class SettingsRepository(private val context: Context) {
                 memoryMb = prefs[KEY_MEMORY_MB] ?: 2048,
                 cpuCores = prefs[KEY_CPU_CORES] ?: 2,
                 diskImagePath = prefs[KEY_DISK_PATH] ?: "",
+                installMediaPath = prefs[KEY_INSTALL_MEDIA_PATH] ?: "",
                 firmwarePath = prefs[KEY_FIRMWARE_PATH] ?: "",
                 extraArgs = prefs[KEY_EXTRA_ARGS] ?: "",
                 sshHostPort = prefs[KEY_SSH_PORT] ?: 2222,
@@ -45,6 +46,7 @@ class SettingsRepository(private val context: Context) {
             prefs[KEY_MEMORY_MB] = updated.memoryMb
             prefs[KEY_CPU_CORES] = updated.cpuCores
             prefs[KEY_DISK_PATH] = updated.diskImagePath
+            prefs[KEY_INSTALL_MEDIA_PATH] = updated.installMediaPath
             prefs[KEY_FIRMWARE_PATH] = updated.firmwarePath
             prefs[KEY_EXTRA_ARGS] = updated.extraArgs
             prefs[KEY_SSH_PORT] = updated.sshHostPort
@@ -79,6 +81,7 @@ class SettingsRepository(private val context: Context) {
         private val KEY_MEMORY_MB = intPreferencesKey("memory_mb")
         private val KEY_CPU_CORES = intPreferencesKey("cpu_cores")
         private val KEY_DISK_PATH = stringPreferencesKey("disk_path")
+        private val KEY_INSTALL_MEDIA_PATH = stringPreferencesKey("install_media_path")
         private val KEY_FIRMWARE_PATH = stringPreferencesKey("firmware_path")
         private val KEY_EXTRA_ARGS = stringPreferencesKey("extra_args")
         private val KEY_SSH_PORT = intPreferencesKey("ssh_port")

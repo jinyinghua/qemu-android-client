@@ -8,11 +8,28 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -135,7 +152,7 @@ fun MainScreen(
                 Card {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Shared Storage Access", style = MaterialTheme.typography.titleMedium)
-                        Text("The VM image and firmware are under /storage/emulated/0/Download. On modern Android, this app needs \"All files access\" to read them directly.")
+                        Text("The VM image and firmware are under /storage/emulated/0/Download. On modern Android, this app needs all files access to read them directly.")
                         Button(onClick = onRequestStorageAccess) { Text("Grant All Files Access") }
                     }
                 }
@@ -158,7 +175,14 @@ fun MainScreen(
                     OutlinedTextField(
                         value = settings.vmConfig.diskImagePath,
                         onValueChange = { onConfigChanged(settings.vmConfig.copy(diskImagePath = it)) },
-                        label = { Text("Disk Image Path (ISO/QCOW2/IMG)") },
+                        label = { Text("System Disk Path (QCOW2/IMG)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = settings.vmConfig.installMediaPath,
+                        onValueChange = { onConfigChanged(settings.vmConfig.copy(installMediaPath = it)) },
+                        label = { Text("Install Media Path (ISO, optional)") },
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -195,14 +219,14 @@ fun MainScreen(
                         Text("Auto Start on Boot")
                         Switch(checked = settings.vmConfig.autoStartOnBoot, onCheckedChange = { onConfigChanged(settings.vmConfig.copy(autoStartOnBoot = it)) })
                     }
-                    
+
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Keep Screen Awake (WakeLock)")
                         Switch(checked = settings.vmConfig.keepScreenAwake, onCheckedChange = { onConfigChanged(settings.vmConfig.copy(keepScreenAwake = it)) })
                     }
                 }
             }
-            
+
             if (settings.runtimeState.lastCommandLine.isNotBlank()) {
                 Card {
                     Column(Modifier.padding(16.dp)) {

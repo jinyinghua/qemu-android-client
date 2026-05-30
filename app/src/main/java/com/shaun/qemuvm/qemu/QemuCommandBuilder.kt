@@ -5,12 +5,13 @@ import java.io.File
 
 class QemuCommandBuilder {
     fun build(executable: File, config: VmConfig): List<String> {
-        require(config.diskImagePath.isNotBlank()) { "Disk image path is required" }
+        require(config.diskImagePath.isNotBlank() || config.installMediaPath.isNotBlank()) {
+            "Disk image path or install media path is required"
+        }
         require(config.firmwarePath.isNotBlank()) { "Firmware path is required" }
 
         val diskPath = config.diskImagePath.trim()
-        val diskLower = diskPath.lowercase()
-        val isIsoImage = diskLower.endsWith(".iso")
+        val installMediaPath = config.installMediaPath.trim()
 
         val args = mutableListOf(
             executable.absolutePath,
@@ -26,21 +27,24 @@ class QemuCommandBuilder {
             "-monitor", "telnet:127.0.0.1:${config.monitorPort},server,nowait"
         )
 
-        if (isIsoImage) {
-            args += listOf(
-                "-device", "virtio-scsi-device",
-                "-drive", "if=none,file=$diskPath,format=raw,media=cdrom,id=cd0",
-                "-device", "scsi-cd,drive=cd0"
-            )
-        } else {
+        if (diskPath.isNotBlank()) {
+            val diskLower = diskPath.lowercase()
             val diskFormat = when {
                 diskLower.endsWith(".qcow2") -> "qcow2"
-                diskLower.endsWith(".img") -> "raw"
                 else -> "raw"
             }
             args += listOf(
                 "-drive", "if=none,file=$diskPath,format=$diskFormat,id=hd0",
                 "-device", "virtio-blk-device,drive=hd0"
+            )
+        }
+
+        if (installMediaPath.isNotBlank()) {
+            args += listOf(
+                "-boot", "order=d",
+                "-device", "virtio-scsi-device",
+                "-drive", "if=none,file=$installMediaPath,format=raw,media=cdrom,id=cd0",
+                "-device", "scsi-cd,drive=cd0"
             )
         }
 

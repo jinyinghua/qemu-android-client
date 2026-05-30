@@ -5,6 +5,7 @@ data class VmConfig(
     val memoryMb: Int = 2048,
     val cpuCores: Int = 2,
     val diskImagePath: String = "",
+    val installMediaPath: String = "",
     val firmwarePath: String = "",
     val extraArgs: String = "",
     val sshHostPort: Int = 2222,

@@ -34,7 +34,7 @@ class KeepAliveService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        
+
         if (intent?.action == ACTION_STOP) {
             stopVm()
             stopSelf()
@@ -82,29 +82,30 @@ class KeepAliveService : LifecycleService() {
         val repo = (application as QemuVmApplication).settingsRepository
         val config = repo.snapshot().vmConfig
 
-        if (config.diskImagePath.isBlank() || config.firmwarePath.isBlank()) {
-            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Disk or firmware path missing") }
+        if (config.diskImagePath.isBlank() && config.installMediaPath.isBlank()) {
+            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Disk image path or install media path missing") }
+            stopSelf()
+            return
+        }
+        if (config.firmwarePath.isBlank()) {
+            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Firmware path missing") }
             stopSelf()
             return
         }
 
-        // Pre-check that files exist and are readable
-        val diskFile = File(config.diskImagePath)
-        val firmwareFile = File(config.firmwarePath)
-        val missing = mutableListOf<String>()
-        if (!diskFile.exists()) missing.add("disk image: ${config.diskImagePath}")
-        else if (!diskFile.canRead()) missing.add("disk image (no read permission): ${config.diskImagePath}")
-        if (!firmwareFile.exists()) missing.add("firmware: ${config.firmwarePath}")
-        else if (!firmwareFile.canRead()) missing.add("firmware (no read permission): ${config.firmwarePath}")
-        if (missing.isNotEmpty()) {
-            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Cannot access:\n${missing.joinToString("\n")}") }
+        val inaccessible = mutableListOf<String>()
+        collectFileIssue(config.diskImagePath, "disk image", inaccessible)
+        collectFileIssue(config.installMediaPath, "install media", inaccessible)
+        collectFileIssue(config.firmwarePath, "firmware", inaccessible)
+        if (inaccessible.isNotEmpty()) {
+            repo.updateRuntimeState { it.copy(isRunning = false, lastError = "Cannot access:\n${inaccessible.joinToString("\n")}") }
             stopSelf()
             return
         }
 
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
         val args = QemuCommandBuilder().build(qemuBin, config)
-        
+
         repo.updateRuntimeState { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
 
         acquireWakeLock(config.keepScreenAwake)
@@ -123,12 +124,13 @@ class KeepAliveService : LifecycleService() {
             val error = if (exitCode != 0) {
                 val trimmed = output.trim()
                 if (trimmed.isNotBlank()) {
-                    val lines = trimmed.lines().takeLast(20)
-                    lines.joinToString("\n")
+                    trimmed.lines().takeLast(20).joinToString("\n")
                 } else {
                     "QEMU exited with code $exitCode (no output)"
                 }
-            } else ""
+            } else {
+                ""
+            }
 
             repo.updateRuntimeState { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
         } catch (e: Exception) {
@@ -136,6 +138,17 @@ class KeepAliveService : LifecycleService() {
         } finally {
             releaseWakeLock()
             stopSelf()
+        }
+    }
+
+    private fun collectFileIssue(path: String, label: String, issues: MutableList<String>) {
+        val trimmed = path.trim()
+        if (trimmed.isBlank()) return
+        val file = File(trimmed)
+        if (!file.exists()) {
+            issues.add("$label: $trimmed")
+        } else if (!file.canRead()) {
+            issues.add("$label (no read permission): $trimmed")
         }
     }
 
