@@ -33,7 +33,7 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Validate Gradle wrapper
-        uses: gradle/wrapper-validation-action@v2
+        uses: gradle/actions/wrapper-validation@v5
 
       - name: Decode release keystore
         if: github.event_name != 'pull_request'
@@ -41,6 +41,9 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+
+      - name: Build Debug APK
+        run: ./gradlew --no-daemon :app:assembleDebug
 
       - name: Build Release APK
         if: github.event_name != 'pull_request'
@@ -50,6 +53,12 @@ jobs:
           ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemuvm-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
 
       - name: Upload Release APK
         if: github.event_name != 'pull_request'
