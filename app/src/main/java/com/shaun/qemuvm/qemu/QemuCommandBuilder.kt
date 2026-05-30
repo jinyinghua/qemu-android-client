@@ -17,6 +17,7 @@ class QemuCommandBuilder {
 
         val diskPath = config.diskImagePath.trim()
         val installMediaPath = config.installMediaPath.trim()
+        val hasInstallMedia = installMediaPath.isNotBlank()
 
         val args = mutableListOf(
             executable.absolutePath,
@@ -40,6 +41,14 @@ class QemuCommandBuilder {
             args += listOf("-bios", config.firmwarePath)
         }
 
+        if (hasInstallMedia) {
+            args += listOf(
+                "-device", "virtio-scsi-pci,id=scsi0",
+                "-drive", "if=none,file=$installMediaPath,format=raw,media=cdrom,id=cd0",
+                "-device", "scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"
+            )
+        }
+
         if (diskPath.isNotBlank()) {
             val diskLower = diskPath.lowercase()
             val diskFormat = when {
@@ -48,16 +57,7 @@ class QemuCommandBuilder {
             }
             args += listOf(
                 "-drive", "if=none,file=$diskPath,format=$diskFormat,id=hd0",
-                "-device", "virtio-blk-device,drive=hd0"
-            )
-        }
-
-        if (installMediaPath.isNotBlank()) {
-            args += listOf(
-                "-boot", "order=d",
-                "-device", "virtio-scsi-device",
-                "-drive", "if=none,file=$installMediaPath,format=raw,media=cdrom,id=cd0",
-                "-device", "scsi-cd,drive=cd0"
+                "-device", "virtio-blk-pci,drive=hd0,bootindex=${if (hasInstallMedia) 1 else 0}"
             )
         }
 
