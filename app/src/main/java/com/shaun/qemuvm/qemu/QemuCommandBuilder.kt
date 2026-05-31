@@ -20,13 +20,16 @@ class QemuCommandBuilder {
         val diskPath = config.diskImagePath.trim()
         val installMediaPath = config.installMediaPath.trim()
         val hasInstallMedia = installMediaPath.isNotBlank()
+        val extraArgs = config.extraArgs.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val wantsVnc = extraArgs.any { it == "-vnc" || it.startsWith("vnc=") }
 
         val args = mutableListOf(
             executable.absolutePath,
             "-machine", "virt",
             "-cpu", "cortex-a72",
             "-m", config.memoryMb.toString(),
-            "-smp", config.cpuCores.toString()
+            "-smp", config.cpuCores.toString(),
+            "-device", "virtio-rng-pci"
         )
 
         if (dataDirPath != null) {
@@ -36,10 +39,18 @@ class QemuCommandBuilder {
         args += listOf(
             "-netdev", "user,id=net0,hostfwd=tcp::${config.sshHostPort}-:22",
             "-device", "virtio-net-pci,netdev=net0,romfile=",
-            "-nographic",
             "-serial", "telnet:127.0.0.1:${config.serialPort},server,nowait",
             "-monitor", "telnet:127.0.0.1:${config.monitorPort},server,nowait"
         )
+
+        if (wantsVnc) {
+            args += listOf(
+                "-display", "none",
+                "-device", "virtio-gpu-pci"
+            )
+        } else {
+            args += listOf("-nographic")
+        }
 
         if (firmwareCodePath != null && firmwareVarsPath != null) {
             args += listOf(
@@ -72,8 +83,8 @@ class QemuCommandBuilder {
             )
         }
 
-        if (config.extraArgs.isNotBlank()) {
-            args += config.extraArgs.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (extraArgs.isNotEmpty()) {
+            args += extraArgs
         }
 
         return args
