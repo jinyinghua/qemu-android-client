@@ -361,8 +361,8 @@ class KeepAliveService : LifecycleService() {
 
         private fun handleClient(client: Socket) {
             client.use { sock ->
-                val input = sock.getInputStream().bufferedInputStream()
-                val output = sock.getOutputStream().bufferedOutputStream()
+                val input = BufferedInputStream(sock.getInputStream())
+                val output = BufferedOutputStream(sock.getOutputStream())
                 val requestLine = readRequestLine(input)
                 val path = requestLine?.split(' ')?.getOrNull(1) ?: "/"
                 val body = when (path) {
