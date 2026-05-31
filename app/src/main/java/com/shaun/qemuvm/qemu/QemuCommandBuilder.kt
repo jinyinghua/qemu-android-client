@@ -27,7 +27,7 @@ class QemuCommandBuilder {
             "-m", config.memoryMb.toString(),
             "-smp", config.cpuCores.toString(),
             "-netdev", "user,id=net0,hostfwd=tcp::${config.sshHostPort}-:22",
-            "-device", "virtio-net-pci,netdev=net0",
+            "-device", "virtio-net-pci,netdev=net0,romfile=",
             "-nographic",
             "-serial", "telnet:127.0.0.1:${config.serialPort},server,nowait",
             "-monitor", "telnet:127.0.0.1:${config.monitorPort},server,nowait"
