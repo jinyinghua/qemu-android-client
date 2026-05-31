@@ -57,11 +57,7 @@ class QemuCommandBuilder {
         }
 
         if (diskPath.isNotBlank()) {
-            val diskLower = diskPath.lowercase()
-            val diskFormat = when {
-                diskLower.endsWith(".qcow2") -> "qcow2"
-                else -> "raw"
-            }
+            val diskFormat = detectDiskFormat(File(diskPath))
             args += listOf(
                 "-drive", "if=none,file=$diskPath,format=$diskFormat,id=hd0",
                 "-device", "virtio-blk-pci,drive=hd0,bootindex=${if (hasInstallMedia) 1 else 0}"
@@ -73,5 +69,28 @@ class QemuCommandBuilder {
         }
 
         return args
+    }
+
+    private fun detectDiskFormat(file: File): String {
+        if (!file.exists() || !file.isFile) return "raw"
+
+        if (file.extension.equals("qcow2", ignoreCase = true)) return "qcow2"
+
+        return runCatching {
+            file.inputStream().use { input ->
+                val header = ByteArray(4)
+                val read = input.read(header)
+                if (read == 4 &&
+                    header[0] == 'Q'.code.toByte() &&
+                    header[1] == 'F'.code.toByte() &&
+                    header[2] == 'I'.code.toByte() &&
+                    header[3] == 0xfb.toByte()
+                ) {
+                    "qcow2"
+                } else {
+                    "raw"
+                }
+            }
+        }.getOrDefault("raw")
     }
 }
