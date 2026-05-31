@@ -22,8 +22,13 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.RandomAccessFile
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
 import java.util.concurrent.TimeUnit
 
 class KeepAliveService : LifecycleService() {
@@ -31,6 +36,7 @@ class KeepAliveService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var process: Process? = null
     @Volatile private var stoppingRequested = false
+    @Volatile private var cloudInitServer: NoCloudServer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -112,7 +118,9 @@ class KeepAliveService : LifecycleService() {
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
         val firmwareCodeFile = ensureFirmwareCodeImage(File(config.firmwarePath))
         val firmwareVarsFile = ensureFirmwareVarsImage()
-        val args = QemuCommandBuilder().build(qemuBin, config, firmwareCodeFile.absolutePath, firmwareVarsFile.absolutePath)
+        startCloudInitServer()
+        val cloudSeedUrl = "http://10.0.2.2:${CLOUD_INIT_PORT}/"
+        val args = QemuCommandBuilder().build(qemuBin, config, firmwareCodeFile.absolutePath, firmwareVarsFile.absolutePath, cloudSeedUrl)
 
         updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
 
@@ -152,6 +160,7 @@ class KeepAliveService : LifecycleService() {
                 updateRuntimeStateSafely { it.copy(isRunning = false, lastError = msg) }
             }
         } finally {
+            stopCloudInitServer()
             releaseWakeLock()
             stopSelf()
         }
@@ -191,6 +200,18 @@ class KeepAliveService : LifecycleService() {
         return varsFile
     }
 
+    private fun startCloudInitServer() {
+        if (cloudInitServer != null) return
+        val server = NoCloudServer(CLOUD_INIT_PORT)
+        server.start()
+        cloudInitServer = server
+    }
+
+    private fun stopCloudInitServer() {
+        cloudInitServer?.close()
+        cloudInitServer = null
+    }
+
     private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
         val repo = (application as QemuVmApplication).settingsRepository
         withContext(NonCancellable + Dispatchers.IO) {
@@ -227,6 +248,7 @@ class KeepAliveService : LifecycleService() {
         }
 
         process = null
+        stopCloudInitServer()
         releaseWakeLock()
         persistStoppedState(stopExitCode)
     }
@@ -290,5 +312,95 @@ class KeepAliveService : LifecycleService() {
         const val ACTION_STOP = "com.shaun.qemuvm.action.STOP"
         private const val CHANNEL_ID = "qemu_vm_channel"
         private const val NOTIFICATION_ID = 101
+        private const val CLOUD_INIT_PORT = 8123
+    }
+
+    private class NoCloudServer(private val port: Int) {
+        @Volatile private var running = true
+        private var socket: ServerSocket? = null
+        private var thread: Thread? = null
+        private val userData = """
+            #cloud-config
+            password: qemu
+            chpasswd: { expire: False }
+            ssh_pwauth: True
+        """.trimIndent() + "\n"
+        private val metaData = """
+            instance-id: qemu-android-client
+            local-hostname: ubuntu-qemu
+        """.trimIndent() + "\n"
+
+        fun start() {
+            thread = Thread {
+                try {
+                    socket = ServerSocket(port)
+                    while (running) {
+                        val client = try {
+                            socket?.accept()
+                        } catch (_: SocketException) {
+                            null
+                        } ?: break
+                        handleClient(client)
+                    }
+                } catch (_: Exception) {
+                    // ignore
+                } finally {
+                    runCatching { socket?.close() }
+                }
+            }.apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        fun close() {
+            running = false
+            runCatching { socket?.close() }
+            thread?.interrupt()
+        }
+
+        private fun handleClient(client: Socket) {
+            client.use { sock ->
+                val input = sock.getInputStream().bufferedInputStream()
+                val output = sock.getOutputStream().bufferedOutputStream()
+                val requestLine = readRequestLine(input)
+                val path = requestLine?.split(' ')?.getOrNull(1) ?: "/"
+                val body = when (path) {
+                    "/user-data" -> userData
+                    "/meta-data" -> metaData
+                    "/network-config" -> ""
+                    "/vendor-data" -> ""
+                    else -> ""
+                }
+                writeResponse(output, body)
+            }
+        }
+
+        private fun readRequestLine(input: BufferedInputStream): String? {
+            val bytes = mutableListOf<Byte>()
+            var prev = -1
+            while (true) {
+                val b = input.read()
+                if (b == -1) break
+                if (b == '\n'.code && prev == '\r'.code) break
+                bytes.add(b.toByte())
+                prev = b
+                if (bytes.size > 4096) break
+            }
+            return bytes.toByteArray().toString(Charsets.UTF_8).trim().takeIf { it.isNotBlank() }
+        }
+
+        private fun writeResponse(output: BufferedOutputStream, body: String) {
+            val data = body.toByteArray(Charsets.UTF_8)
+            val headers = buildString {
+                append("HTTP/1.1 200 OK\r\n")
+                append("Content-Type: text/plain; charset=utf-8\r\n")
+                append("Content-Length: ${data.size}\r\n")
+                append("Connection: close\r\n\r\n")
+            }.toByteArray(Charsets.UTF_8)
+            output.write(headers)
+            output.write(data)
+            output.flush()
+        }
     }
 }

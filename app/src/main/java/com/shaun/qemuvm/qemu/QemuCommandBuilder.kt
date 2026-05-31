@@ -8,7 +8,8 @@ class QemuCommandBuilder {
         executable: File,
         config: VmConfig,
         firmwareCodePath: String? = null,
-        firmwareVarsPath: String? = null
+        firmwareVarsPath: String? = null,
+        cloudSeedUrl: String? = null
     ): List<String> {
         require(config.diskImagePath.isNotBlank() || config.installMediaPath.isNotBlank()) {
             "Disk image path or install media path is required"
@@ -39,6 +40,12 @@ class QemuCommandBuilder {
             )
         } else {
             args += listOf("-bios", config.firmwarePath)
+        }
+
+        if (cloudSeedUrl != null) {
+            args += listOf(
+                "-smbios", "type=1,serial=ds=nocloud-net;s=$cloudSeedUrl"
+            )
         }
 
         if (hasInstallMedia) {
