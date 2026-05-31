@@ -118,9 +118,17 @@ class KeepAliveService : LifecycleService() {
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
         val firmwareCodeFile = ensureFirmwareCodeImage(File(config.firmwarePath))
         val firmwareVarsFile = ensureFirmwareVarsImage()
+        val qemuDataDir = ensureQemuDataDir()
         startCloudInitServer()
         val cloudSeedUrl = "http://10.0.2.2:${CLOUD_INIT_PORT}/"
-        val args = QemuCommandBuilder().build(qemuBin, config, firmwareCodeFile.absolutePath, firmwareVarsFile.absolutePath, cloudSeedUrl)
+        val args = QemuCommandBuilder().build(
+            qemuBin,
+            config,
+            firmwareCodeFile.absolutePath,
+            firmwareVarsFile.absolutePath,
+            cloudSeedUrl,
+            qemuDataDir.absolutePath
+        )
 
         updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
 
@@ -198,6 +206,19 @@ class KeepAliveService : LifecycleService() {
             }
         }
         return varsFile
+    }
+
+    private fun ensureQemuDataDir(): File {
+        val baseDir = File(filesDir, "qemu-data")
+        val keymapsDir = File(baseDir, "keymaps")
+        if (!keymapsDir.exists()) {
+            keymapsDir.mkdirs()
+        }
+        val enUsKeymap = File(keymapsDir, "en-us")
+        if (!enUsKeymap.exists()) {
+            enUsKeymap.writeText("", Charsets.US_ASCII)
+        }
+        return baseDir
     }
 
     private fun startCloudInitServer() {

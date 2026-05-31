@@ -9,7 +9,8 @@ class QemuCommandBuilder {
         config: VmConfig,
         firmwareCodePath: String? = null,
         firmwareVarsPath: String? = null,
-        cloudSeedUrl: String? = null
+        cloudSeedUrl: String? = null,
+        dataDirPath: String? = null
     ): List<String> {
         require(config.diskImagePath.isNotBlank() || config.installMediaPath.isNotBlank()) {
             "Disk image path or install media path is required"
@@ -25,7 +26,14 @@ class QemuCommandBuilder {
             "-machine", "virt",
             "-cpu", "cortex-a72",
             "-m", config.memoryMb.toString(),
-            "-smp", config.cpuCores.toString(),
+            "-smp", config.cpuCores.toString()
+        )
+
+        if (dataDirPath != null) {
+            args += listOf("-L", dataDirPath)
+        }
+
+        args += listOf(
             "-netdev", "user,id=net0,hostfwd=tcp::${config.sshHostPort}-:22",
             "-device", "virtio-net-pci,netdev=net0,romfile=",
             "-nographic",
