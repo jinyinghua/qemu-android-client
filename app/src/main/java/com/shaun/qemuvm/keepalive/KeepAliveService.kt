@@ -22,13 +22,10 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
-import java.util.zip.CRC32
 
 class KeepAliveService : LifecycleService() {
 
@@ -221,30 +218,22 @@ class KeepAliveService : LifecycleService() {
         val seedFile = File(filesDir, "cloud-init-seed.img")
         val userData = (
             "#cloud-config\n" +
-                "users:\n" +
-                "  - default\n" +
-                "chpasswd:\n" +
-                "  expire: false\n" +
-                "  users:\n" +
-                "    - {name: ubuntu, password: qemu, type: text}\n" +
-                "ssh_pwauth: true\n" +
-                "disable_root: false\n" +
-                "runcmd:\n" +
-                "  - [ systemctl, enable, --now, ssh ]\n"
+                "password: qemu\n" +
+                "ssh_pwauth: true\n"
             ).toByteArray(StandardCharsets.US_ASCII)
         val metaData = (
             "instance-id: qemu-android-client\n" +
                 "local-hostname: ubuntu-qemu\n"
             ).toByteArray(StandardCharsets.US_ASCII)
 
-        writeSeedFatImage(seedFile, mapOf(
-            "user-data" to userData,
-            "meta-data" to metaData
+        writeSeedFatImage(seedFile, listOf(
+            SeedFile("user-data", shortName = "USERDATA", shortExt = "", data = userData),
+            SeedFile("meta-data", shortName = "METADATA", shortExt = "", data = metaData)
         ))
         return seedFile
     }
 
-    private fun writeSeedFatImage(target: File, files: Map<String, ByteArray>) {
+    private fun writeSeedFatImage(target: File, files: List<SeedFile>) {
         val bytesPerSector = 512
         val sectorsPerCluster = 1
         val reservedSectors = 1
@@ -254,8 +243,6 @@ class KeepAliveService : LifecycleService() {
         val totalSectors = 2880
         val mediaDescriptor = 0xF0
         val sectorsPerFat = 9
-        val hiddenSectors = 0
-        val volumeId = 0x51454d55
         val totalBytes = totalSectors * bytesPerSector
         val image = ByteArray(totalBytes)
 
@@ -283,12 +270,12 @@ class KeepAliveService : LifecycleService() {
         writeLe16(22, sectorsPerFat)
         writeLe16(24, 18)
         writeLe16(26, 2)
-        writeLe32(28, hiddenSectors)
+        writeLe32(28, 0)
         writeLe32(32, 0)
         image[36] = 0x00
         image[37] = 0x00
         image[38] = 0x29.toByte()
-        writeLe32(39, volumeId)
+        writeLe32(39, 0x51454d55)
         "CIDATA     ".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 43)
         "FAT12   ".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 54)
         image[510] = 0x55.toByte()
@@ -306,24 +293,33 @@ class KeepAliveService : LifecycleService() {
         var nextCluster = 2
         var rootEntryIndex = 0
 
-        files.forEach { (name, data) ->
-            val clusterCount = ((data.size + clusterSize - 1) / clusterSize).coerceAtLeast(1)
+        files.forEach { file ->
+            val clusterCount = ((file.data.size + clusterSize - 1) / clusterSize).coerceAtLeast(1)
             val startCluster = nextCluster
             repeat(clusterCount) { index ->
                 val cluster = nextCluster++
                 fatEntries[cluster] = if (index == clusterCount - 1) 0xFFF else cluster + 1
                 val writeOffset = dataOffset + (cluster - 2) * clusterSize
                 val start = index * clusterSize
-                val end = minOf(start + clusterSize, data.size)
-                data.copyInto(image, writeOffset, start, end)
+                val end = minOf(start + clusterSize, file.data.size)
+                file.data.copyInto(image, writeOffset, start, end)
+            }
+
+            val shortName = buildShortName(file.shortName, file.shortExt)
+            val checksum = lfnChecksum(shortName)
+            val lfnEntries = buildLongFileNameEntries(file.longName, checksum)
+            lfnEntries.forEach { entry ->
+                val entryOffset = rootOffset + rootEntryIndex * 32
+                rootEntryIndex++
+                entry.copyInto(image, entryOffset)
             }
 
             val entryOffset = rootOffset + rootEntryIndex * 32
             rootEntryIndex++
-            createShortName(name).copyInto(image, entryOffset)
+            shortName.copyInto(image, entryOffset)
             image[entryOffset + 11] = 0x20
             writeLe16(entryOffset + 26, startCluster)
-            writeLe32(entryOffset + 28, data.size)
+            writeLe32(entryOffset + 28, file.data.size)
         }
 
         repeat(fatCount) { fatIndex ->
@@ -344,16 +340,61 @@ class KeepAliveService : LifecycleService() {
         target.writeBytes(image)
     }
 
-    private fun createShortName(name: String): ByteArray {
-        val parts = name.uppercase().split('.', limit = 2)
-        val base = parts[0].filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+    private fun buildShortName(name: String, ext: String): ByteArray {
+        val base = name.uppercase()
+            .filter { it.isLetterOrDigit() || it == '_' }
             .padEnd(8, ' ')
             .take(8)
-        val ext = parts.getOrElse(1) { "" }
-            .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+        val suffix = ext.uppercase()
+            .filter { it.isLetterOrDigit() || it == '_' }
             .padEnd(3, ' ')
             .take(3)
-        return (base + ext).toByteArray(StandardCharsets.US_ASCII)
+        return (base + suffix).toByteArray(StandardCharsets.US_ASCII)
+    }
+
+    private fun lfnChecksum(shortName: ByteArray): Byte {
+        var sum = 0
+        shortName.forEach { byte ->
+            sum = (((sum and 1) shl 7) + (sum ushr 1) + (byte.toInt() and 0xff)) and 0xff
+        }
+        return sum.toByte()
+    }
+
+    private fun buildLongFileNameEntries(name: String, checksum: Byte): List<ByteArray> {
+        val utf16 = name.toByteArray(StandardCharsets.UTF_16LE)
+        val codeUnits = ArrayList<Int>()
+        var index = 0
+        while (index < utf16.size) {
+            codeUnits += ((utf16[index + 1].toInt() and 0xff) shl 8) or (utf16[index].toInt() and 0xff)
+            index += 2
+        }
+        codeUnits += 0x0000
+        while (codeUnits.size % 13 != 0) codeUnits += 0xffff
+
+        val chunks = codeUnits.chunked(13)
+        return chunks.reversed().mapIndexed { idx, chunk ->
+            val ordinal = chunks.size - idx
+            ByteArray(32).also { entry ->
+                entry[0] = (ordinal or if (idx == 0) 0x40 else 0x00).toByte()
+                writeUtf16Chunk(entry, 1, chunk, 0, 5)
+                entry[11] = 0x0f.toByte()
+                entry[12] = 0x00
+                entry[13] = checksum
+                writeUtf16Chunk(entry, 14, chunk, 5, 6)
+                entry[26] = 0x00
+                entry[27] = 0x00
+                writeUtf16Chunk(entry, 28, chunk, 11, 2)
+            }
+        }
+    }
+
+    private fun writeUtf16Chunk(target: ByteArray, offset: Int, units: List<Int>, start: Int, count: Int) {
+        repeat(count) { index ->
+            val value = units[start + index]
+            val pos = offset + index * 2
+            target[pos] = (value and 0xff).toByte()
+            target[pos + 1] = ((value ushr 8) and 0xff).toByte()
+        }
     }
 
     private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
@@ -456,4 +497,11 @@ class KeepAliveService : LifecycleService() {
         private const val CHANNEL_ID = "qemu_vm_channel"
         private const val NOTIFICATION_ID = 101
     }
+
+    private data class SeedFile(
+        val longName: String,
+        val shortName: String,
+        val shortExt: String,
+        val data: ByteArray
+    )
 }
