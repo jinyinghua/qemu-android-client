@@ -25,6 +25,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class KeepAliveService : LifecycleService() {
@@ -218,12 +219,23 @@ class KeepAliveService : LifecycleService() {
         val seedFile = File(filesDir, "cloud-init-seed.img")
         val userData = (
             "#cloud-config\n" +
-                "password: qemu\n" +
-                "ssh_pwauth: true\n"
+                "ssh_pwauth: true\n" +
+                "users:\n" +
+                "  - name: alpine\n" +
+                "    lock_passwd: false\n" +
+                "    plain_text_passwd: qemu\n" +
+                "  - name: root\n" +
+                "    lock_passwd: false\n" +
+                "    plain_text_passwd: qemu\n" +
+                "runcmd:\n" +
+                "  - sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config\n" +
+                "  - sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config\n" +
+                "  - printf 'root:qemu\\nalpine:qemu\\n' | chpasswd\n" +
+                "  - rc-service sshd restart\n"
             ).toByteArray(StandardCharsets.US_ASCII)
         val metaData = (
-            "instance-id: qemu-android-client\n" +
-                "local-hostname: ubuntu-qemu\n"
+            "instance-id: ${UUID.randomUUID()}\n" +
+                "local-hostname: alpine-qemu\n"
             ).toByteArray(StandardCharsets.US_ASCII)
 
         writeSeedFatImage(seedFile, listOf(
