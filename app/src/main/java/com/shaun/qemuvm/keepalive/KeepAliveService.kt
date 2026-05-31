@@ -26,17 +26,15 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.RandomAccessFile
-import java.net.ServerSocket
-import java.net.Socket
-import java.net.SocketException
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
+import java.util.zip.CRC32
 
 class KeepAliveService : LifecycleService() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var process: Process? = null
     @Volatile private var stoppingRequested = false
-    @Volatile private var cloudInitServer: NoCloudServer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -119,14 +117,13 @@ class KeepAliveService : LifecycleService() {
         val firmwareCodeFile = ensureFirmwareCodeImage(File(config.firmwarePath))
         val firmwareVarsFile = ensureFirmwareVarsImage()
         val qemuDataDir = ensureQemuDataDir()
-        startCloudInitServer()
-        val cloudSeedUrl = "http://10.0.2.2:${CLOUD_INIT_PORT}/"
+        val cloudSeedFile = ensureCloudInitSeedImage()
         val args = QemuCommandBuilder().build(
             qemuBin,
             config,
             firmwareCodeFile.absolutePath,
             firmwareVarsFile.absolutePath,
-            cloudSeedUrl,
+            cloudSeedFile.absolutePath,
             qemuDataDir.absolutePath
         )
 
@@ -168,7 +165,6 @@ class KeepAliveService : LifecycleService() {
                 updateRuntimeStateSafely { it.copy(isRunning = false, lastError = msg) }
             }
         } finally {
-            stopCloudInitServer()
             releaseWakeLock()
             stopSelf()
         }
@@ -221,16 +217,143 @@ class KeepAliveService : LifecycleService() {
         return baseDir
     }
 
-    private fun startCloudInitServer() {
-        if (cloudInitServer != null) return
-        val server = NoCloudServer(CLOUD_INIT_PORT)
-        server.start()
-        cloudInitServer = server
+    private fun ensureCloudInitSeedImage(): File {
+        val seedFile = File(filesDir, "cloud-init-seed.img")
+        val userData = (
+            "#cloud-config\n" +
+                "users:\n" +
+                "  - default\n" +
+                "chpasswd:\n" +
+                "  expire: false\n" +
+                "  users:\n" +
+                "    - {name: ubuntu, password: qemu, type: text}\n" +
+                "ssh_pwauth: true\n" +
+                "disable_root: false\n" +
+                "runcmd:\n" +
+                "  - [ systemctl, enable, --now, ssh ]\n"
+            ).toByteArray(StandardCharsets.US_ASCII)
+        val metaData = (
+            "instance-id: qemu-android-client\n" +
+                "local-hostname: ubuntu-qemu\n"
+            ).toByteArray(StandardCharsets.US_ASCII)
+
+        writeSeedFatImage(seedFile, mapOf(
+            "user-data" to userData,
+            "meta-data" to metaData
+        ))
+        return seedFile
     }
 
-    private fun stopCloudInitServer() {
-        cloudInitServer?.close()
-        cloudInitServer = null
+    private fun writeSeedFatImage(target: File, files: Map<String, ByteArray>) {
+        val bytesPerSector = 512
+        val sectorsPerCluster = 1
+        val reservedSectors = 1
+        val fatCount = 2
+        val rootEntries = 64
+        val rootDirSectors = (rootEntries * 32 + bytesPerSector - 1) / bytesPerSector
+        val totalSectors = 2880
+        val mediaDescriptor = 0xF0
+        val sectorsPerFat = 9
+        val hiddenSectors = 0
+        val volumeId = 0x51454d55
+        val totalBytes = totalSectors * bytesPerSector
+        val image = ByteArray(totalBytes)
+
+        fun writeLe16(offset: Int, value: Int) {
+            image[offset] = (value and 0xff).toByte()
+            image[offset + 1] = ((value ushr 8) and 0xff).toByte()
+        }
+
+        fun writeLe32(offset: Int, value: Int) {
+            writeLe16(offset, value and 0xffff)
+            writeLe16(offset + 2, (value ushr 16) and 0xffff)
+        }
+
+        image[0] = 0xeb.toByte()
+        image[1] = 0x3c.toByte()
+        image[2] = 0x90.toByte()
+        "MSDOS5.0".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 3)
+        writeLe16(11, bytesPerSector)
+        image[13] = sectorsPerCluster.toByte()
+        writeLe16(14, reservedSectors)
+        image[16] = fatCount.toByte()
+        writeLe16(17, rootEntries)
+        writeLe16(19, totalSectors)
+        image[21] = mediaDescriptor.toByte()
+        writeLe16(22, sectorsPerFat)
+        writeLe16(24, 18)
+        writeLe16(26, 2)
+        writeLe32(28, hiddenSectors)
+        writeLe32(32, 0)
+        image[36] = 0x00
+        image[37] = 0x00
+        image[38] = 0x29.toByte()
+        writeLe32(39, volumeId)
+        "CIDATA     ".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 43)
+        "FAT12   ".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 54)
+        image[510] = 0x55.toByte()
+        image[511] = 0xaa.toByte()
+
+        val fatOffset = reservedSectors * bytesPerSector
+        val rootOffset = fatOffset + fatCount * sectorsPerFat * bytesPerSector
+        val dataOffset = rootOffset + rootDirSectors * bytesPerSector
+        val clusterSize = sectorsPerCluster * bytesPerSector
+
+        val fatEntries = IntArray(4084)
+        fatEntries[0] = mediaDescriptor or 0xF00
+        fatEntries[1] = 0xFFF
+
+        var nextCluster = 2
+        var rootEntryIndex = 0
+
+        files.forEach { (name, data) ->
+            val clusterCount = ((data.size + clusterSize - 1) / clusterSize).coerceAtLeast(1)
+            val startCluster = nextCluster
+            repeat(clusterCount) { index ->
+                val cluster = nextCluster++
+                fatEntries[cluster] = if (index == clusterCount - 1) 0xFFF else cluster + 1
+                val writeOffset = dataOffset + (cluster - 2) * clusterSize
+                val start = index * clusterSize
+                val end = minOf(start + clusterSize, data.size)
+                data.copyInto(image, writeOffset, start, end)
+            }
+
+            val entryOffset = rootOffset + rootEntryIndex * 32
+            rootEntryIndex++
+            createShortName(name).copyInto(image, entryOffset)
+            image[entryOffset + 11] = 0x20
+            writeLe16(entryOffset + 26, startCluster)
+            writeLe32(entryOffset + 28, data.size)
+        }
+
+        repeat(fatCount) { fatIndex ->
+            val targetOffset = fatOffset + fatIndex * sectorsPerFat * bytesPerSector
+            var out = targetOffset
+            var entry = 0
+            while (entry + 1 < fatEntries.size && out + 2 < targetOffset + sectorsPerFat * bytesPerSector) {
+                val a = fatEntries[entry] and 0xFFF
+                val b = fatEntries[entry + 1] and 0xFFF
+                image[out] = (a and 0xff).toByte()
+                image[out + 1] = (((a ushr 8) and 0x0f) or ((b and 0x0f) shl 4)).toByte()
+                image[out + 2] = ((b ushr 4) and 0xff).toByte()
+                out += 3
+                entry += 2
+            }
+        }
+
+        target.writeBytes(image)
+    }
+
+    private fun createShortName(name: String): ByteArray {
+        val parts = name.uppercase().split('.', limit = 2)
+        val base = parts[0].filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+            .padEnd(8, ' ')
+            .take(8)
+        val ext = parts.getOrElse(1) { "" }
+            .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+            .padEnd(3, ' ')
+            .take(3)
+        return (base + ext).toByteArray(StandardCharsets.US_ASCII)
     }
 
     private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
@@ -269,7 +392,6 @@ class KeepAliveService : LifecycleService() {
         }
 
         process = null
-        stopCloudInitServer()
         releaseWakeLock()
         persistStoppedState(stopExitCode)
     }
@@ -333,95 +455,5 @@ class KeepAliveService : LifecycleService() {
         const val ACTION_STOP = "com.shaun.qemuvm.action.STOP"
         private const val CHANNEL_ID = "qemu_vm_channel"
         private const val NOTIFICATION_ID = 101
-        private const val CLOUD_INIT_PORT = 8123
-    }
-
-    private class NoCloudServer(private val port: Int) {
-        @Volatile private var running = true
-        private var socket: ServerSocket? = null
-        private var thread: Thread? = null
-        private val userData = """
-            #cloud-config
-            password: qemu
-            chpasswd: { expire: False }
-            ssh_pwauth: True
-        """.trimIndent() + "\n"
-        private val metaData = """
-            instance-id: qemu-android-client
-            local-hostname: ubuntu-qemu
-        """.trimIndent() + "\n"
-
-        fun start() {
-            thread = Thread {
-                try {
-                    socket = ServerSocket(port)
-                    while (running) {
-                        val client = try {
-                            socket?.accept()
-                        } catch (_: SocketException) {
-                            null
-                        } ?: break
-                        handleClient(client)
-                    }
-                } catch (_: Exception) {
-                    // ignore
-                } finally {
-                    runCatching { socket?.close() }
-                }
-            }.apply {
-                isDaemon = true
-                start()
-            }
-        }
-
-        fun close() {
-            running = false
-            runCatching { socket?.close() }
-            thread?.interrupt()
-        }
-
-        private fun handleClient(client: Socket) {
-            client.use { sock ->
-                val input = BufferedInputStream(sock.getInputStream())
-                val output = BufferedOutputStream(sock.getOutputStream())
-                val requestLine = readRequestLine(input)
-                val path = requestLine?.split(' ')?.getOrNull(1) ?: "/"
-                val body = when (path) {
-                    "/user-data" -> userData
-                    "/meta-data" -> metaData
-                    "/network-config" -> ""
-                    "/vendor-data" -> ""
-                    else -> ""
-                }
-                writeResponse(output, body)
-            }
-        }
-
-        private fun readRequestLine(input: BufferedInputStream): String? {
-            val bytes = mutableListOf<Byte>()
-            var prev = -1
-            while (true) {
-                val b = input.read()
-                if (b == -1) break
-                if (b == '\n'.code && prev == '\r'.code) break
-                bytes.add(b.toByte())
-                prev = b
-                if (bytes.size > 4096) break
-            }
-            return bytes.toByteArray().toString(Charsets.UTF_8).trim().takeIf { it.isNotBlank() }
-        }
-
-        private fun writeResponse(output: BufferedOutputStream, body: String) {
-            val data = body.toByteArray(Charsets.UTF_8)
-            val headers = buildString {
-                append("HTTP/1.1 200 OK\r\n")
-                append("Content-Type: text/plain; charset=utf-8\r\n")
-                append("Content-Length: ${data.size}\r\n")
-                append("Connection: close\r\n\r\n")
-            }.toByteArray(Charsets.UTF_8)
-            output.write(headers)
-            output.write(data)
-            output.flush()
-        }
     }
 }

@@ -9,7 +9,7 @@ class QemuCommandBuilder {
         config: VmConfig,
         firmwareCodePath: String? = null,
         firmwareVarsPath: String? = null,
-        cloudSeedUrl: String? = null,
+        cloudSeedImagePath: String? = null,
         dataDirPath: String? = null
     ): List<String> {
         require(config.diskImagePath.isNotBlank() || config.installMediaPath.isNotBlank()) {
@@ -61,9 +61,11 @@ class QemuCommandBuilder {
             args += listOf("-bios", config.firmwarePath)
         }
 
-        if (cloudSeedUrl != null) {
+        if (cloudSeedImagePath != null) {
             args += listOf(
-                "-smbios", "type=1,serial=ds=nocloud-net;s=$cloudSeedUrl"
+                "-device", "virtio-scsi-pci,id=seedscsi0",
+                "-drive", "if=none,file=$cloudSeedImagePath,format=raw,media=disk,readonly=on,id=seed0",
+                "-device", "scsi-hd,drive=seed0,bus=seedscsi0.0"
             )
         }
 
