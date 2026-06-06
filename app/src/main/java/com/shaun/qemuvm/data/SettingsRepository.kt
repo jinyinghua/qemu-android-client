@@ -27,13 +27,17 @@ class SettingsRepository(private val context: Context) {
                 serialPort = prefs[KEY_SERIAL_PORT] ?: 5555,
                 monitorPort = prefs[KEY_MONITOR_PORT] ?: 5556,
                 autoStartOnBoot = prefs[KEY_AUTO_START] ?: false,
-                keepScreenAwake = prefs[KEY_KEEP_SCREEN_AWAKE] ?: false
+                keepScreenAwake = prefs[KEY_KEEP_SCREEN_AWAKE] ?: false,
+                enableEdgeOverlay = prefs[KEY_EDGE_OVERLAY] ?: false,
+                hideFromRecents = prefs[KEY_HIDE_FROM_RECENTS] ?: false
             ),
             runtimeState = VmRuntimeState(
                 isRunning = prefs[KEY_IS_RUNNING] ?: false,
                 lastExitCode = prefs[KEY_LAST_EXIT_CODE],
                 lastError = prefs[KEY_LAST_ERROR] ?: "",
-                lastCommandLine = prefs[KEY_LAST_COMMAND] ?: ""
+                lastCommandLine = prefs[KEY_LAST_COMMAND] ?: "",
+                lastTaskOutput = prefs[KEY_LAST_TASK_OUTPUT] ?: "",
+                taskInProgress = prefs[KEY_TASK_IN_PROGRESS] ?: false
             )
         )
     }
@@ -54,6 +58,8 @@ class SettingsRepository(private val context: Context) {
             prefs[KEY_MONITOR_PORT] = updated.monitorPort
             prefs[KEY_AUTO_START] = updated.autoStartOnBoot
             prefs[KEY_KEEP_SCREEN_AWAKE] = updated.keepScreenAwake
+            prefs[KEY_EDGE_OVERLAY] = updated.enableEdgeOverlay
+            prefs[KEY_HIDE_FROM_RECENTS] = updated.hideFromRecents
         }
     }
 
@@ -69,6 +75,8 @@ class SettingsRepository(private val context: Context) {
             }
             prefs[KEY_LAST_ERROR] = updated.lastError
             prefs[KEY_LAST_COMMAND] = updated.lastCommandLine
+            prefs[KEY_LAST_TASK_OUTPUT] = updated.lastTaskOutput
+            prefs[KEY_TASK_IN_PROGRESS] = updated.taskInProgress
         }
     }
 
@@ -89,9 +97,13 @@ class SettingsRepository(private val context: Context) {
         private val KEY_MONITOR_PORT = intPreferencesKey("monitor_port")
         private val KEY_AUTO_START = booleanPreferencesKey("auto_start")
         private val KEY_KEEP_SCREEN_AWAKE = booleanPreferencesKey("keep_screen_awake")
+        private val KEY_EDGE_OVERLAY = booleanPreferencesKey("edge_overlay")
+        private val KEY_HIDE_FROM_RECENTS = booleanPreferencesKey("hide_from_recents")
         private val KEY_IS_RUNNING = booleanPreferencesKey("is_running")
         private val KEY_LAST_EXIT_CODE = intPreferencesKey("last_exit_code")
         private val KEY_LAST_ERROR = stringPreferencesKey("last_error")
         private val KEY_LAST_COMMAND = stringPreferencesKey("last_command")
+        private val KEY_LAST_TASK_OUTPUT = stringPreferencesKey("last_task_output")
+        private val KEY_TASK_IN_PROGRESS = booleanPreferencesKey("task_in_progress")
     }
 }

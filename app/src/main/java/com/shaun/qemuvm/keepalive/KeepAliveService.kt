@@ -1,14 +1,18 @@
 package com.shaun.qemuvm.keepalive
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.os.Build
 import android.os.PowerManager
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
@@ -32,6 +36,8 @@ class KeepAliveService : LifecycleService() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var process: Process? = null
+    private var overlayView: View? = null
+    private var windowManager: WindowManager? = null
     @Volatile private var stoppingRequested = false
 
     override fun onCreate() {
@@ -75,11 +81,7 @@ class KeepAliveService : LifecycleService() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val type = if (Build.VERSION.SDK_INT >= 34) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            } else {
-                0
-            }
+            val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
             startForeground(NOTIFICATION_ID, notification, type)
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -88,7 +90,8 @@ class KeepAliveService : LifecycleService() {
 
     private suspend fun startVm() {
         stoppingRequested = false
-        val config = (application as QemuVmApplication).settingsRepository.snapshot().vmConfig
+        val repo = (application as QemuVmApplication).settingsRepository
+        val config = repo.snapshot().vmConfig
 
         if (config.diskImagePath.isBlank() && config.installMediaPath.isBlank()) {
             updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Disk image path or install media path missing") }
@@ -126,32 +129,23 @@ class KeepAliveService : LifecycleService() {
         )
 
         updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
-
         acquireWakeLock(config.keepScreenAwake)
+        if (config.enableEdgeOverlay) withContext(Dispatchers.Main) { showEdgeOverlay() }
 
         try {
             val pb = ProcessBuilder(args)
             NativeBinaryLocator.configureEnvironment(this, pb)
             pb.redirectErrorStream(true)
             process = pb.start()
-
             val currentProcess = process
-            val output = withContext(Dispatchers.IO) {
-                currentProcess?.inputStream?.bufferedReader()?.readText() ?: ""
-            }
+            val output = withContext(Dispatchers.IO) { currentProcess?.inputStream?.bufferedReader()?.readText() ?: "" }
             val exitCode = currentProcess?.waitFor() ?: -1
             process = null
 
             val error = if (exitCode != 0) {
                 val trimmed = output.trim()
-                if (trimmed.isNotBlank()) {
-                    trimmed.lines().takeLast(20).joinToString("\n")
-                } else {
-                    "QEMU exited with code $exitCode (no output)"
-                }
-            } else {
-                ""
-            }
+                if (trimmed.isNotBlank()) trimmed.lines().takeLast(20).joinToString("\n") else "QEMU exited with code $exitCode (no output)"
+            } else ""
 
             updateRuntimeStateSafely { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
         } catch (e: Exception) {
@@ -163,18 +157,46 @@ class KeepAliveService : LifecycleService() {
                 updateRuntimeStateSafely { it.copy(isRunning = false, lastError = msg) }
             }
         } finally {
+            withContext(Dispatchers.Main) { hideEdgeOverlay() }
             releaseWakeLock()
             stopSelf()
         }
     }
 
+    private fun showEdgeOverlay() {
+        if (overlayView != null) return
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+        val params = WindowManager.LayoutParams(
+            2,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.END or Gravity.TOP
+        }
+        val view = View(this).apply { setBackgroundColor(Color.argb(8, 255, 255, 255)) }
+        runCatching { wm.addView(view, params) }
+        windowManager = wm
+        overlayView = view
+    }
+
+    private fun hideEdgeOverlay() {
+        val wm = windowManager ?: return
+        val view = overlayView ?: return
+        runCatching { wm.removeView(view) }
+        overlayView = null
+        windowManager = null
+    }
+
     private fun ensureFirmwareCodeImage(sourceFirmware: File): File {
         val codeFile = File(filesDir, "qemu-efi-code.img")
         val targetSize = 64L * 1024L * 1024L
-        val needsRefresh = !codeFile.exists() ||
-            codeFile.length() != targetSize ||
-            codeFile.lastModified() < sourceFirmware.lastModified()
-
+        val needsRefresh = !codeFile.exists() || codeFile.length() != targetSize || codeFile.lastModified() < sourceFirmware.lastModified()
         if (needsRefresh) {
             RandomAccessFile(codeFile, "rw").use { raf ->
                 raf.setLength(targetSize)
@@ -195,9 +217,7 @@ class KeepAliveService : LifecycleService() {
     private fun ensureFirmwareVarsImage(): File {
         val varsFile = File(filesDir, "qemu-efi-vars.img")
         if (!varsFile.exists() || varsFile.length() != 64L * 1024L * 1024L) {
-            RandomAccessFile(varsFile, "rw").use { raf ->
-                raf.setLength(64L * 1024L * 1024L)
-            }
+            RandomAccessFile(varsFile, "rw").use { it.setLength(64L * 1024L * 1024L) }
         }
         return varsFile
     }
@@ -205,13 +225,9 @@ class KeepAliveService : LifecycleService() {
     private fun ensureQemuDataDir(): File {
         val baseDir = File(filesDir, "qemu-data")
         val keymapsDir = File(baseDir, "keymaps")
-        if (!keymapsDir.exists()) {
-            keymapsDir.mkdirs()
-        }
+        if (!keymapsDir.exists()) keymapsDir.mkdirs()
         val enUsKeymap = File(keymapsDir, "en-us")
-        if (!enUsKeymap.exists()) {
-            enUsKeymap.writeText("", Charsets.US_ASCII)
-        }
+        if (!enUsKeymap.exists()) enUsKeymap.writeText("", Charsets.US_ASCII)
         return baseDir
     }
 
@@ -237,10 +253,9 @@ class KeepAliveService : LifecycleService() {
             "instance-id: ${UUID.randomUUID()}\n" +
                 "local-hostname: alpine-qemu\n"
             ).toByteArray(StandardCharsets.US_ASCII)
-
         writeSeedFatImage(seedFile, listOf(
-            SeedFile("user-data", shortName = "USERDATA", shortExt = "", data = userData),
-            SeedFile("meta-data", shortName = "METADATA", shortExt = "", data = metaData)
+            SeedFile("user-data", "USERDATA", "", userData),
+            SeedFile("meta-data", "METADATA", "", metaData)
         ))
         return seedFile
     }
@@ -262,15 +277,12 @@ class KeepAliveService : LifecycleService() {
             image[offset] = (value and 0xff).toByte()
             image[offset + 1] = ((value ushr 8) and 0xff).toByte()
         }
-
         fun writeLe32(offset: Int, value: Int) {
             writeLe16(offset, value and 0xffff)
             writeLe16(offset + 2, (value ushr 16) and 0xffff)
         }
 
-        image[0] = 0xeb.toByte()
-        image[1] = 0x3c.toByte()
-        image[2] = 0x90.toByte()
+        image[0] = 0xeb.toByte(); image[1] = 0x3c.toByte(); image[2] = 0x90.toByte()
         "MSDOS5.0".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 3)
         writeLe16(11, bytesPerSector)
         image[13] = sectorsPerCluster.toByte()
@@ -284,24 +296,19 @@ class KeepAliveService : LifecycleService() {
         writeLe16(26, 2)
         writeLe32(28, 0)
         writeLe32(32, 0)
-        image[36] = 0x00
-        image[37] = 0x00
-        image[38] = 0x29.toByte()
+        image[36] = 0x00; image[37] = 0x00; image[38] = 0x29.toByte()
         writeLe32(39, 0x51454d55)
         "CIDATA     ".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 43)
         "FAT12   ".toByteArray(StandardCharsets.US_ASCII).copyInto(image, 54)
-        image[510] = 0x55.toByte()
-        image[511] = 0xaa.toByte()
+        image[510] = 0x55.toByte(); image[511] = 0xaa.toByte()
 
         val fatOffset = reservedSectors * bytesPerSector
         val rootOffset = fatOffset + fatCount * sectorsPerFat * bytesPerSector
         val dataOffset = rootOffset + rootDirSectors * bytesPerSector
         val clusterSize = sectorsPerCluster * bytesPerSector
-
         val fatEntries = IntArray(4084)
         fatEntries[0] = mediaDescriptor or 0xF00
         fatEntries[1] = 0xFFF
-
         var nextCluster = 2
         var rootEntryIndex = 0
 
@@ -316,7 +323,6 @@ class KeepAliveService : LifecycleService() {
                 val end = minOf(start + clusterSize, file.data.size)
                 file.data.copyInto(image, writeOffset, start, end)
             }
-
             val shortName = buildShortName(file.shortName, file.shortExt)
             val checksum = lfnChecksum(shortName)
             val lfnEntries = buildLongFileNameEntries(file.longName, checksum)
@@ -325,7 +331,6 @@ class KeepAliveService : LifecycleService() {
                 rootEntryIndex++
                 entry.copyInto(image, entryOffset)
             }
-
             val entryOffset = rootOffset + rootEntryIndex * 32
             rootEntryIndex++
             shortName.copyInto(image, entryOffset)
@@ -348,27 +353,18 @@ class KeepAliveService : LifecycleService() {
                 entry += 2
             }
         }
-
         target.writeBytes(image)
     }
 
     private fun buildShortName(name: String, ext: String): ByteArray {
-        val base = name.uppercase()
-            .filter { it.isLetterOrDigit() || it == '_' }
-            .padEnd(8, ' ')
-            .take(8)
-        val suffix = ext.uppercase()
-            .filter { it.isLetterOrDigit() || it == '_' }
-            .padEnd(3, ' ')
-            .take(3)
+        val base = name.uppercase().filter { it.isLetterOrDigit() || it == '_' }.padEnd(8, ' ').take(8)
+        val suffix = ext.uppercase().filter { it.isLetterOrDigit() || it == '_' }.padEnd(3, ' ').take(3)
         return (base + suffix).toByteArray(StandardCharsets.US_ASCII)
     }
 
     private fun lfnChecksum(shortName: ByteArray): Byte {
         var sum = 0
-        shortName.forEach { byte ->
-            sum = (((sum and 1) shl 7) + (sum ushr 1) + (byte.toInt() and 0xff)) and 0xff
-        }
+        shortName.forEach { byte -> sum = (((sum and 1) shl 7) + (sum ushr 1) + (byte.toInt() and 0xff)) and 0xff }
         return sum.toByte()
     }
 
@@ -382,19 +378,15 @@ class KeepAliveService : LifecycleService() {
         }
         codeUnits += 0x0000
         while (codeUnits.size % 13 != 0) codeUnits += 0xffff
-
         val chunks = codeUnits.chunked(13)
         return chunks.reversed().mapIndexed { idx, chunk ->
             val ordinal = chunks.size - idx
             ByteArray(32).also { entry ->
                 entry[0] = (ordinal or if (idx == 0) 0x40 else 0x00).toByte()
                 writeUtf16Chunk(entry, 1, chunk, 0, 5)
-                entry[11] = 0x0f.toByte()
-                entry[12] = 0x00
-                entry[13] = checksum
+                entry[11] = 0x0f.toByte(); entry[12] = 0x00; entry[13] = checksum
                 writeUtf16Chunk(entry, 14, chunk, 5, 6)
-                entry[26] = 0x00
-                entry[27] = 0x00
+                entry[26] = 0x00; entry[27] = 0x00
                 writeUtf16Chunk(entry, 28, chunk, 11, 2)
             }
         }
@@ -411,26 +403,19 @@ class KeepAliveService : LifecycleService() {
 
     private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
         val repo = (application as QemuVmApplication).settingsRepository
-        withContext(NonCancellable + Dispatchers.IO) {
-            repo.updateRuntimeState(transform)
-        }
+        withContext(NonCancellable + Dispatchers.IO) { repo.updateRuntimeState(transform) }
     }
 
     private fun collectFileIssue(path: String, label: String, issues: MutableList<String>) {
         val trimmed = path.trim()
         if (trimmed.isBlank()) return
         val file = File(trimmed)
-        if (!file.exists()) {
-            issues.add("$label: $trimmed")
-        } else if (!file.canRead()) {
-            issues.add("$label (no read permission): $trimmed")
-        }
+        if (!file.exists()) issues.add("$label: $trimmed") else if (!file.canRead()) issues.add("$label (no read permission): $trimmed")
     }
 
     private fun stopVm() {
         val currentProcess = process
         var stopExitCode: Int? = null
-
         if (currentProcess != null) {
             runCatching {
                 currentProcess.destroy()
@@ -438,13 +423,11 @@ class KeepAliveService : LifecycleService() {
                     currentProcess.destroyForcibly()
                     currentProcess.waitFor(1500, TimeUnit.MILLISECONDS)
                 }
-                if (!currentProcess.isAlive) {
-                    stopExitCode = currentProcess.exitValue()
-                }
+                if (!currentProcess.isAlive) stopExitCode = currentProcess.exitValue()
             }
         }
-
         process = null
+        hideEdgeOverlay()
         releaseWakeLock()
         persistStoppedState(stopExitCode)
     }
@@ -454,11 +437,7 @@ class KeepAliveService : LifecycleService() {
             runBlocking(Dispatchers.IO) {
                 val repo = (application as QemuVmApplication).settingsRepository
                 repo.updateRuntimeState {
-                    it.copy(
-                        isRunning = false,
-                        lastExitCode = exitCode ?: it.lastExitCode,
-                        lastError = if (stoppingRequested) "" else it.lastError
-                    )
+                    it.copy(isRunning = false, lastExitCode = exitCode ?: it.lastExitCode, lastError = if (stoppingRequested) "" else it.lastError)
                 }
             }
         }
@@ -467,30 +446,18 @@ class KeepAliveService : LifecycleService() {
     private fun acquireWakeLock(keepScreenAwake: Boolean) {
         if (wakeLock?.isHeld == true) return
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        val levelAndFlags = if (keepScreenAwake) {
-            PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE
-        } else {
-            PowerManager.PARTIAL_WAKE_LOCK
-        }
-        wakeLock = pm.newWakeLock(levelAndFlags, "QemuVm::RuntimeWakeLock").apply {
-            acquire()
-        }
+        val levelAndFlags = if (keepScreenAwake) PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE else PowerManager.PARTIAL_WAKE_LOCK
+        wakeLock = pm.newWakeLock(levelAndFlags, "QemuVm::RuntimeWakeLock").apply { acquire() }
     }
 
     private fun releaseWakeLock() {
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
-        }
+        if (wakeLock?.isHeld == true) wakeLock?.release()
         wakeLock = null
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.notification_channel_name),
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
+            val channel = NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
                 description = getString(R.string.notification_channel_description)
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -510,10 +477,5 @@ class KeepAliveService : LifecycleService() {
         private const val NOTIFICATION_ID = 101
     }
 
-    private data class SeedFile(
-        val longName: String,
-        val shortName: String,
-        val shortExt: String,
-        val data: ByteArray
-    )
+    private data class SeedFile(val longName: String, val shortName: String, val shortExt: String, val data: ByteArray)
 }

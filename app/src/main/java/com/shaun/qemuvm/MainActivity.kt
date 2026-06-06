@@ -1,10 +1,19 @@
 package com.shaun.qemuvm
 
 import android.Manifest
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+import android.view.Gravity
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,7 +38,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -38,8 +50,11 @@ import com.shaun.qemuvm.data.AppSettings
 import com.shaun.qemuvm.data.VmConfig
 import com.shaun.qemuvm.keepalive.KeepAliveService
 import com.shaun.qemuvm.util.BatteryOptimizationHelper
+import com.shaun.qemuvm.util.NativeBinaryLocator
 import com.shaun.qemuvm.util.StorageAccessHelper
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.File
 
 class MainActivity : ComponentActivity() {
 
@@ -54,6 +69,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val repo = (application as QemuVmApplication).settingsRepository
+        applyRecentsVisibility(repo.snapshotBlocking().vmConfig.hideFromRecents)
 
         setContent {
             MaterialTheme {
@@ -64,14 +80,21 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         settings = appSettings,
                         onConfigChanged = { newConfig ->
-                            scope.launch { repo.updateVmConfig { newConfig } }
+                            scope.launch {
+                                repo.updateVmConfig { newConfig }
+                                applyRecentsVisibility(newConfig.hideFromRecents)
+                            }
                         },
                         onStartVm = { startVm() },
                         onStopVm = { stopVm() },
                         onRequestBatteryOpt = { requestBatteryOptimization() },
                         onRequestStorageAccess = { requestAllFilesAccess() },
+                        onRequestOverlayPermission = { requestOverlayPermission() },
+                        onConvertQcowToRaw = { source, dest -> runDiskTask("Convert QCOW2 to RAW") { convertQcow2ToRaw(source, dest) } },
+                        onResizeDisk = { path, sizeGiB -> runDiskTask("Resize disk") { resizeDisk(path, sizeGiB) } },
                         isBatteryOptIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(this),
-                        hasStorageAccess = StorageAccessHelper.hasRequiredAccessForSharedStorage()
+                        hasStorageAccess = StorageAccessHelper.hasRequiredAccessForSharedStorage(),
+                        hasOverlayPermission = Settings.canDrawOverlays(this)
                     )
                 }
             }
@@ -107,7 +130,76 @@ class MainActivity : ComponentActivity() {
             e.printStackTrace()
         }
     }
+
+    private fun requestOverlayPermission() {
+        if (Settings.canDrawOverlays(this)) return
+        runCatching {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        }
+    }
+
+    private fun runDiskTask(name: String, block: () -> String) {
+        val repo = (application as QemuVmApplication).settingsRepository
+        lifecycleScope.launch(Dispatchers.IO) {
+            repo.updateRuntimeState { it.copy(taskInProgress = true, lastTaskOutput = "$name: running...", lastError = "") }
+            val result = runCatching { block() }.getOrElse { e -> "ERROR: ${e.message ?: e.javaClass.simpleName}" }
+            repo.updateRuntimeState { it.copy(taskInProgress = false, lastTaskOutput = result) }
+        }
+    }
+
+    private fun convertQcow2ToRaw(source: String, destination: String): String {
+        require(source.isNotBlank()) { "Source path missing" }
+        require(destination.isNotBlank()) { "Destination path missing" }
+        File(destination).parentFile?.mkdirs()
+        val qemuImg = NativeBinaryLocator.resolveExecutable(this, "libqemu_img.so")
+        val pb = ProcessBuilder(qemuImg.absolutePath, "convert", "-p", "-f", "qcow2", "-O", "raw", source, destination)
+        NativeBinaryLocator.configureEnvironment(this, pb)
+        pb.redirectErrorStream(true)
+        val process = pb.start()
+        val output = process.inputStream.bufferedReader().readText()
+        val code = process.waitFor()
+        if (code != 0) error(output.ifBlank { "qemu-img convert failed with code $code" })
+        return buildString {
+            appendLine("Convert completed")
+            appendLine("Source: $source")
+            appendLine("Destination: $destination")
+            if (output.isNotBlank()) append(output.trim())
+        }
+    }
+
+    private fun resizeDisk(path: String, sizeGiB: Int): String {
+        require(path.isNotBlank()) { "Disk path missing" }
+        require(sizeGiB > 0) { "Target GiB must be > 0" }
+        val qemuImg = NativeBinaryLocator.resolveExecutable(this, "libqemu_img.so")
+        val format = if (path.lowercase().endsWith(".qcow2")) "qcow2" else "raw"
+        val sizeArg = "${sizeGiB}G"
+        val pb = ProcessBuilder(qemuImg.absolutePath, "resize", "-f", format, path, sizeArg)
+        NativeBinaryLocator.configureEnvironment(this, pb)
+        pb.redirectErrorStream(true)
+        val process = pb.start()
+        val output = process.inputStream.bufferedReader().readText()
+        val code = process.waitFor()
+        if (code != 0) error(output.ifBlank { "qemu-img resize failed with code $code" })
+        return buildString {
+            appendLine("Resize completed")
+            appendLine("Disk: $path")
+            appendLine("Target: $sizeArg")
+            if (output.isNotBlank()) append(output.trim())
+        }
+    }
+
+    private fun applyRecentsVisibility(hide: Boolean) {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        if (hide) {
+            am.appTasks.forEach { it.setExcludeFromRecents(true) }
+        } else {
+            am.appTasks.forEach { it.setExcludeFromRecents(false) }
+        }
+    }
 }
+
+private fun com.shaun.qemuvm.data.SettingsRepository.snapshotBlocking(): AppSettings =
+    kotlinx.coroutines.runBlocking { snapshot() }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -118,9 +210,22 @@ fun MainScreen(
     onStopVm: () -> Unit,
     onRequestBatteryOpt: () -> Unit,
     onRequestStorageAccess: () -> Unit,
+    onRequestOverlayPermission: () -> Unit,
+    onConvertQcowToRaw: (String, String) -> Unit,
+    onResizeDisk: (String, Int) -> Unit,
     isBatteryOptIgnored: Boolean,
-    hasStorageAccess: Boolean
+    hasStorageAccess: Boolean,
+    hasOverlayPermission: Boolean
 ) {
+    var convertSource by remember { mutableStateOf(settings.vmConfig.diskImagePath) }
+    var convertDest by remember {
+        mutableStateOf(
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "converted.raw").absolutePath
+        )
+    }
+    var resizePath by remember { mutableStateOf(settings.vmConfig.diskImagePath) }
+    var resizeGiB by remember { mutableStateOf("4") }
+
     Scaffold(
         topBar = { TopAppBar(title = { Text("QEMU Android Client") }) }
     ) { padding ->
@@ -174,7 +279,11 @@ fun MainScreen(
 
                     OutlinedTextField(
                         value = settings.vmConfig.diskImagePath,
-                        onValueChange = { onConfigChanged(settings.vmConfig.copy(diskImagePath = it)) },
+                        onValueChange = {
+                            onConfigChanged(settings.vmConfig.copy(diskImagePath = it))
+                            convertSource = it
+                            resizePath = it
+                        },
                         label = { Text("System Disk Path (QCOW2/IMG)") },
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -223,6 +332,71 @@ fun MainScreen(
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Keep Screen Awake (WakeLock)")
                         Switch(checked = settings.vmConfig.keepScreenAwake, onCheckedChange = { onConfigChanged(settings.vmConfig.copy(keepScreenAwake = it)) })
+                    }
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Transparent Edge Overlay")
+                        Switch(
+                            checked = settings.vmConfig.enableEdgeOverlay,
+                            onCheckedChange = {
+                                if (it && !hasOverlayPermission) onRequestOverlayPermission()
+                                onConfigChanged(settings.vmConfig.copy(enableEdgeOverlay = it))
+                            }
+                        )
+                    }
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Hide from Recents")
+                        Switch(
+                            checked = settings.vmConfig.hideFromRecents,
+                            onCheckedChange = { onConfigChanged(settings.vmConfig.copy(hideFromRecents = it)) }
+                        )
+                    }
+                }
+            }
+
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Disk Tools", style = MaterialTheme.typography.titleMedium)
+                    OutlinedTextField(
+                        value = convertSource,
+                        onValueChange = { convertSource = it },
+                        label = { Text("QCOW2 source path") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = convertDest,
+                        onValueChange = { convertDest = it },
+                        label = { Text("RAW destination path") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(onClick = { onConvertQcowToRaw(convertSource, convertDest) }, enabled = !settings.runtimeState.taskInProgress) {
+                        Text("Convert QCOW2 to RAW")
+                    }
+
+                    OutlinedTextField(
+                        value = resizePath,
+                        onValueChange = { resizePath = it },
+                        label = { Text("Disk path to resize") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = resizeGiB,
+                        onValueChange = { resizeGiB = it },
+                        label = { Text("Target size (GiB)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(onClick = { resizeGiB.toIntOrNull()?.let { onResizeDisk(resizePath, it) } }, enabled = !settings.runtimeState.taskInProgress) {
+                        Text("Resize RAW/QCOW2")
+                    }
+                }
+            }
+
+            if (settings.runtimeState.lastTaskOutput.isNotBlank()) {
+                Card {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Last Task Output", style = MaterialTheme.typography.titleSmall)
+                        Text(settings.runtimeState.lastTaskOutput, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }

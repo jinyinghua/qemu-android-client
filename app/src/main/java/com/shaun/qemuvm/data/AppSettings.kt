@@ -12,14 +12,18 @@ data class VmConfig(
     val serialPort: Int = 5555,
     val monitorPort: Int = 5556,
     val autoStartOnBoot: Boolean = false,
-    val keepScreenAwake: Boolean = false
+    val keepScreenAwake: Boolean = false,
+    val enableEdgeOverlay: Boolean = false,
+    val hideFromRecents: Boolean = false
 )
 
 data class VmRuntimeState(
     val isRunning: Boolean = false,
     val lastExitCode: Int? = null,
     val lastError: String = "",
-    val lastCommandLine: String = ""
+    val lastCommandLine: String = "",
+    val lastTaskOutput: String = "",
+    val taskInProgress: Boolean = false
 )
 
 data class AppSettings(
