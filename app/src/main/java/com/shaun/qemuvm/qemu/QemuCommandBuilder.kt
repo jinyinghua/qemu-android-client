@@ -26,7 +26,10 @@ class QemuCommandBuilder {
         val args = mutableListOf(
             executable.absolutePath,
             "-machine", "virt",
-            "-cpu", "cortex-a72",
+            // --- TCG 多线程加速 (无KVM时最关键) ---
+            "-accel", "tcg,thread=multi",
+            // --- CPU 模型: max 比 cortex-a72 暴露更多特性，减少翻译开销 ---
+            "-cpu", "max",
             "-m", config.memoryMb.toString(),
             "-smp", config.cpuCores.toString(),
             "-device", "virtio-rng-pci"
@@ -79,10 +82,14 @@ class QemuCommandBuilder {
 
         if (diskPath.isNotBlank()) {
             val diskFormat = detectDiskFormat(File(diskPath))
-            args += listOf(
-                "-drive", "if=none,file=$diskPath,format=$diskFormat,id=hd0",
-                "-device", "virtio-blk-pci,drive=hd0,bootindex=${if (hasInstallMedia) 1 else 0}"
-            )
+            // IOThread: 让磁盘IO跑在独立线程，减少TCG主线程压力
+            args += "-object"
+            args += "iothread,id=ioth0"
+            // cache=unsafe: 大幅提升IO性能（Alpine测试环境安全）
+            args += "-drive"
+            args += "if=none,file=$diskPath,format=$diskFormat,id=hd0,cache=unsafe"
+            args += "-device"
+            args += "virtio-blk-pci,drive=hd0,iothread=ioth0,bootindex=${if (hasInstallMedia) 1 else 0}"
         }
 
         if (extraArgs.isNotEmpty()) {

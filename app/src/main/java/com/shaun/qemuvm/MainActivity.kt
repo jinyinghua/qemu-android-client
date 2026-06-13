@@ -51,11 +51,14 @@ import com.shaun.qemuvm.data.AppSettings
 import com.shaun.qemuvm.data.VmConfig
 import com.shaun.qemuvm.keepalive.KeepAliveService
 import com.shaun.qemuvm.util.BatteryOptimizationHelper
+import com.shaun.qemuvm.util.DiskPreparer
+import com.shaun.qemuvm.util.DiskResizer
 import com.shaun.qemuvm.util.NativeBinaryLocator
 import com.shaun.qemuvm.util.StorageAccessHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
+import kotlin.math.roundToLong
 
 class MainActivity : ComponentActivity() {
 
@@ -93,6 +96,8 @@ class MainActivity : ComponentActivity() {
                         onRequestOverlayPermission = { requestOverlayPermission() },
                         onConvertQcowToRaw = { source, dest -> runDiskTask("Convert QCOW2 to RAW") { convertQcow2ToRaw(source, dest) } },
                         onResizeDisk = { path, sizeGiB -> runDiskTask("Resize disk") { resizeDisk(path, sizeGiB) } },
+                        onDeletePrivateCopy = { deletePrivateCopy() },
+                        onResizePrivateCopy = { newSizeGiB -> resizePrivateCopy(newSizeGiB) },
                         isBatteryOptIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(this),
                         hasStorageAccess = StorageAccessHelper.hasRequiredAccessForSharedStorage(),
                         hasOverlayPermission = Settings.canDrawOverlays(this)
@@ -148,6 +153,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun deletePrivateCopy() {
+        runDiskTask("Delete private copy") {
+            val success = DiskPreparer.deletePrivateCopy(this)
+            if (success) "Private copy deleted successfully" else "Some files could not be deleted"
+        }
+    }
+
+    /** 扩容私有目录中的磁盘副本 */
+    private fun resizePrivateCopy(newSizeGiB: Int) {
+        runDiskTask("Resize private copy") {
+            val privateCopy = DiskPreparer.getPrivateCopyPath(this)
+                ?: error("No private copy found. Start the VM first to create one.")
+            DiskResizer(this).resize(privateCopy.absolutePath, newSizeGiB)
+        }
+    }
+
     private fun convertQcow2ToRaw(source: String, destination: String): String {
         require(source.isNotBlank()) { "Source path missing" }
         require(destination.isNotBlank()) { "Destination path missing" }
@@ -171,22 +192,7 @@ class MainActivity : ComponentActivity() {
     private fun resizeDisk(path: String, sizeGiB: Int): String {
         require(path.isNotBlank()) { "Disk path missing" }
         require(sizeGiB > 0) { "Target GiB must be > 0" }
-        val qemuImg = NativeBinaryLocator.resolveExecutable(this, "libqemu_img.so")
-        val format = if (path.lowercase().endsWith(".qcow2")) "qcow2" else "raw"
-        val sizeArg = "${sizeGiB}G"
-        val pb = ProcessBuilder(qemuImg.absolutePath, "resize", "-f", format, path, sizeArg)
-        NativeBinaryLocator.configureEnvironment(this, pb)
-        pb.redirectErrorStream(true)
-        val process = pb.start()
-        val output = process.inputStream.bufferedReader().readText()
-        val code = process.waitFor()
-        if (code != 0) error(output.ifBlank { "qemu-img resize failed with code $code" })
-        return buildString {
-            appendLine("Resize completed")
-            appendLine("Disk: $path")
-            appendLine("Target: $sizeArg")
-            if (output.isNotBlank()) append(output.trim())
-        }
+        return DiskResizer(this).resize(path, sizeGiB)
     }
 
     private fun applyRecentsVisibility(hide: Boolean) {
@@ -214,6 +220,8 @@ fun MainScreen(
     onRequestOverlayPermission: () -> Unit,
     onConvertQcowToRaw: (String, String) -> Unit,
     onResizeDisk: (String, Int) -> Unit,
+    onDeletePrivateCopy: () -> Unit,
+    onResizePrivateCopy: (Int) -> Unit,
     isBatteryOptIgnored: Boolean,
     hasStorageAccess: Boolean,
     hasOverlayPermission: Boolean
@@ -226,6 +234,7 @@ fun MainScreen(
     }
     var resizePath by remember { mutableStateOf(settings.vmConfig.diskImagePath) }
     var resizeGiB by remember { mutableStateOf("4") }
+    var privateResizeGiB by remember { mutableStateOf("8") }
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("QEMU Android Client") }) }
@@ -237,6 +246,7 @@ fun MainScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // ============ Status ============
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Status", style = MaterialTheme.typography.titleMedium)
@@ -247,6 +257,10 @@ fun MainScreen(
                     if (settings.runtimeState.lastExitCode != null) {
                         Text("Last exit code: ${settings.runtimeState.lastExitCode}")
                     }
+                    if (settings.runtimeState.actualDiskPath.isNotBlank()) {
+                        Text("Actual disk path:", style = MaterialTheme.typography.bodySmall)
+                        Text(settings.runtimeState.actualDiskPath, style = MaterialTheme.typography.bodySmall)
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = onStartVm, enabled = !settings.runtimeState.isRunning) { Text("Start VM") }
                         Button(onClick = onStopVm, enabled = settings.runtimeState.isRunning) { Text("Stop VM") }
@@ -254,6 +268,7 @@ fun MainScreen(
                 }
             }
 
+            // ============ Shared Storage ============
             if (!hasStorageAccess) {
                 Card {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -264,6 +279,7 @@ fun MainScreen(
                 }
             }
 
+            // ============ Battery Optimization ============
             if (!isBatteryOptIgnored) {
                 Card {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -274,6 +290,7 @@ fun MainScreen(
                 }
             }
 
+            // ============ VM Configuration ============
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("VM Configuration", style = MaterialTheme.typography.titleMedium)
@@ -285,7 +302,7 @@ fun MainScreen(
                             convertSource = it
                             resizePath = it
                         },
-                        label = { Text("System Disk Path (QCOW2/IMG)") },
+                        label = { Text("System Disk Path (RAW/QCOW2)") },
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -326,6 +343,23 @@ fun MainScreen(
                     )
 
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Copy to private directory")
+                        Switch(
+                            checked = settings.vmConfig.copyToPrivateDir,
+                            onCheckedChange = { onConfigChanged(settings.vmConfig.copy(copyToPrivateDir = it)) }
+                        )
+                    }
+
+                    if (settings.vmConfig.copyToPrivateDir) {
+                        Text(
+                            "On start, the disk image will be copied to app private dir with full preallocation. " +
+                                "This bypasses SAF/FUSE for better IO performance.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Auto Start on Boot")
                         Switch(checked = settings.vmConfig.autoStartOnBoot, onCheckedChange = { onConfigChanged(settings.vmConfig.copy(autoStartOnBoot = it)) })
                     }
@@ -356,6 +390,57 @@ fun MainScreen(
                 }
             }
 
+            // ============ Private Copy Management ============
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Private Copy Management", style = MaterialTheme.typography.titleMedium)
+
+                    // 私有副本状态（仅显示信息，不自动刷新）
+                    Text("Status info available after first VM start.", style = MaterialTheme.typography.bodySmall)
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Button(
+                            onClick = onDeletePrivateCopy,
+                            enabled = !settings.runtimeState.taskInProgress
+                        ) {
+                            Text("Delete Private Copy")
+                        }
+                    }
+
+                    // 扩容
+                    Text("Expand disk size:", style = MaterialTheme.typography.bodySmall)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = privateResizeGiB,
+                            onValueChange = { privateResizeGiB = it },
+                            label = { Text("New size (GiB)") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = {
+                                privateResizeGiB.toIntOrNull()?.let { size ->
+                                    if (size > 0) onResizePrivateCopy(size)
+                                }
+                            },
+                            enabled = !settings.runtimeState.taskInProgress
+                        ) {
+                            Text("Expand")
+                        }
+                    }
+
+                    Text(
+                        "Expands the private copy to the specified size. " +
+                            "After expansion, you'll need to partition the new space inside the guest (e.g. fdisk + resize2fs).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // ============ Disk Tools ============
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Disk Tools", style = MaterialTheme.typography.titleMedium)
@@ -393,6 +478,7 @@ fun MainScreen(
                 }
             }
 
+            // ============ Task Output ============
             if (settings.runtimeState.lastTaskOutput.isNotBlank()) {
                 Card {
                     Column(Modifier.padding(16.dp)) {

@@ -19,7 +19,9 @@ import androidx.lifecycle.lifecycleScope
 import com.shaun.qemuvm.MainActivity
 import com.shaun.qemuvm.R
 import com.shaun.qemuvm.app.QemuVmApplication
+import com.shaun.qemuvm.data.VmRuntimeState
 import com.shaun.qemuvm.qemu.QemuCommandBuilder
+import com.shaun.qemuvm.util.DiskPreparer
 import com.shaun.qemuvm.util.NativeBinaryLocator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -104,8 +106,20 @@ class KeepAliveService : LifecycleService() {
             return
         }
 
+        // ========== Step 1: 磁盘导入 + 预分配 ==========
+        val preparer = DiskPreparer(this)
+        val prepResult = preparer.prepare(config.diskImagePath, config.copyToPrivateDir)
+        val actualDiskPath = prepResult.preparedFile.absolutePath
+
+        if (prepResult.wasCopied) {
+            updateRuntimeStateSafely {
+                it.copy(lastTaskOutput = prepResult.log)
+            }
+        }
+
+        // 用实际的磁盘路径去检查文件可达性
         val inaccessible = mutableListOf<String>()
-        collectFileIssue(config.diskImagePath, "disk image", inaccessible)
+        collectFileIssue(actualDiskPath, "disk image", inaccessible)
         collectFileIssue(config.installMediaPath, "install media", inaccessible)
         collectFileIssue(config.firmwarePath, "firmware", inaccessible)
         if (inaccessible.isNotEmpty()) {
@@ -114,21 +128,32 @@ class KeepAliveService : LifecycleService() {
             return
         }
 
+        // ========== Step 2: 构建 QEMU 命令（用实际的磁盘路径） ==========
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
         val firmwareCodeFile = ensureFirmwareCodeImage(File(config.firmwarePath))
         val firmwareVarsFile = ensureFirmwareVarsImage()
         val qemuDataDir = ensureQemuDataDir()
         val cloudSeedFile = ensureCloudInitSeedImage()
+
+        // 用替换后的磁盘路径构建命令
+        val effectiveConfig = config.copy(diskImagePath = actualDiskPath)
         val args = QemuCommandBuilder().build(
             qemuBin,
-            config,
+            effectiveConfig,
             firmwareCodeFile.absolutePath,
             firmwareVarsFile.absolutePath,
             cloudSeedFile.absolutePath,
             qemuDataDir.absolutePath
         )
 
-        updateRuntimeStateSafely { it.copy(isRunning = true, lastCommandLine = args.joinToString(" "), lastError = "") }
+        updateRuntimeStateSafely {
+            it.copy(
+                isRunning = true,
+                lastCommandLine = args.joinToString(" "),
+                lastError = "",
+                actualDiskPath = actualDiskPath
+            )
+        }
         acquireWakeLock(config.keepScreenAwake)
         if (config.enableEdgeOverlay) withContext(Dispatchers.Main) { showEdgeOverlay() }
 
@@ -401,7 +426,7 @@ class KeepAliveService : LifecycleService() {
         }
     }
 
-    private suspend fun updateRuntimeStateSafely(transform: (com.shaun.qemuvm.data.VmRuntimeState) -> com.shaun.qemuvm.data.VmRuntimeState) {
+    private suspend fun updateRuntimeStateSafely(transform: (VmRuntimeState) -> VmRuntimeState) {
         val repo = (application as QemuVmApplication).settingsRepository
         withContext(NonCancellable + Dispatchers.IO) { repo.updateRuntimeState(transform) }
     }

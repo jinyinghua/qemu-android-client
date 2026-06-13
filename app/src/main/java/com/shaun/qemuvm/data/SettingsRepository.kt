@@ -17,7 +17,7 @@ class SettingsRepository(private val context: Context) {
         AppSettings(
             vmConfig = VmConfig(
                 qemuBinaryName = prefs[KEY_QEMU_BINARY] ?: "libqemu.so",
-                memoryMb = prefs[KEY_MEMORY_MB] ?: 2048,
+                memoryMb = prefs[KEY_MEMORY_MB] ?: 2560,
                 cpuCores = prefs[KEY_CPU_CORES] ?: 2,
                 diskImagePath = prefs[KEY_DISK_PATH] ?: "",
                 installMediaPath = prefs[KEY_INSTALL_MEDIA_PATH] ?: "",
@@ -29,7 +29,8 @@ class SettingsRepository(private val context: Context) {
                 autoStartOnBoot = prefs[KEY_AUTO_START] ?: false,
                 keepScreenAwake = prefs[KEY_KEEP_SCREEN_AWAKE] ?: false,
                 enableEdgeOverlay = prefs[KEY_EDGE_OVERLAY] ?: false,
-                hideFromRecents = prefs[KEY_HIDE_FROM_RECENTS] ?: false
+                hideFromRecents = prefs[KEY_HIDE_FROM_RECENTS] ?: false,
+                copyToPrivateDir = prefs[KEY_COPY_TO_PRIVATE] ?: true
             ),
             runtimeState = VmRuntimeState(
                 isRunning = prefs[KEY_IS_RUNNING] ?: false,
@@ -37,7 +38,8 @@ class SettingsRepository(private val context: Context) {
                 lastError = prefs[KEY_LAST_ERROR] ?: "",
                 lastCommandLine = prefs[KEY_LAST_COMMAND] ?: "",
                 lastTaskOutput = prefs[KEY_LAST_TASK_OUTPUT] ?: "",
-                taskInProgress = prefs[KEY_TASK_IN_PROGRESS] ?: false
+                taskInProgress = prefs[KEY_TASK_IN_PROGRESS] ?: false,
+                actualDiskPath = prefs[KEY_ACTUAL_DISK_PATH] ?: ""
             )
         )
     }
@@ -60,6 +62,7 @@ class SettingsRepository(private val context: Context) {
             prefs[KEY_KEEP_SCREEN_AWAKE] = updated.keepScreenAwake
             prefs[KEY_EDGE_OVERLAY] = updated.enableEdgeOverlay
             prefs[KEY_HIDE_FROM_RECENTS] = updated.hideFromRecents
+            prefs[KEY_COPY_TO_PRIVATE] = updated.copyToPrivateDir
         }
     }
 
@@ -77,6 +80,7 @@ class SettingsRepository(private val context: Context) {
             prefs[KEY_LAST_COMMAND] = updated.lastCommandLine
             prefs[KEY_LAST_TASK_OUTPUT] = updated.lastTaskOutput
             prefs[KEY_TASK_IN_PROGRESS] = updated.taskInProgress
+            prefs[KEY_ACTUAL_DISK_PATH] = updated.actualDiskPath
         }
     }
 
@@ -99,11 +103,13 @@ class SettingsRepository(private val context: Context) {
         private val KEY_KEEP_SCREEN_AWAKE = booleanPreferencesKey("keep_screen_awake")
         private val KEY_EDGE_OVERLAY = booleanPreferencesKey("edge_overlay")
         private val KEY_HIDE_FROM_RECENTS = booleanPreferencesKey("hide_from_recents")
+        private val KEY_COPY_TO_PRIVATE = booleanPreferencesKey("copy_to_private")
         private val KEY_IS_RUNNING = booleanPreferencesKey("is_running")
         private val KEY_LAST_EXIT_CODE = intPreferencesKey("last_exit_code")
         private val KEY_LAST_ERROR = stringPreferencesKey("last_error")
         private val KEY_LAST_COMMAND = stringPreferencesKey("last_command")
         private val KEY_LAST_TASK_OUTPUT = stringPreferencesKey("last_task_output")
         private val KEY_TASK_IN_PROGRESS = booleanPreferencesKey("task_in_progress")
+        private val KEY_ACTUAL_DISK_PATH = stringPreferencesKey("actual_disk_path")
     }
 }
