@@ -21,8 +21,18 @@ data class VmConfig(
     val copyToPrivateDir: Boolean = true
 )
 
+enum class VmState {
+    Idle,
+    PreparingDisk,
+    PreparingFirmware,
+    Starting,
+    Running,
+    Stopping,
+    Failed
+}
+
 data class VmRuntimeState(
-    val isRunning: Boolean = false,
+    val state: VmState = VmState.Idle,
     val lastExitCode: Int? = null,
     val lastError: String = "",
     val lastCommandLine: String = "",
@@ -30,7 +40,10 @@ data class VmRuntimeState(
     val taskInProgress: Boolean = false,
     // 实际用于运行的磁盘路径（导入后可能不同于配置中的路径）
     val actualDiskPath: String = ""
-)
+) {
+    val isRunning: Boolean
+        get() = state == VmState.Running
+}
 
 data class AppSettings(
     val vmConfig: VmConfig = VmConfig(),

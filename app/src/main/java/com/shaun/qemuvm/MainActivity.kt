@@ -49,6 +49,7 @@ import androidx.lifecycle.lifecycleScope
 import com.shaun.qemuvm.app.QemuVmApplication
 import com.shaun.qemuvm.data.AppSettings
 import com.shaun.qemuvm.data.VmConfig
+import com.shaun.qemuvm.data.VmState
 import com.shaun.qemuvm.keepalive.KeepAliveService
 import com.shaun.qemuvm.util.BatteryOptimizationHelper
 import com.shaun.qemuvm.util.DiskPreparer
@@ -73,7 +74,10 @@ class MainActivity : ComponentActivity() {
         }
 
         val repo = (application as QemuVmApplication).settingsRepository
-        applyRecentsVisibility(repo.snapshotBlocking().vmConfig.hideFromRecents)
+        lifecycleScope.launch {
+            val snapshot = repo.settings.first()
+            applyRecentsVisibility(snapshot.vmConfig.hideFromRecents)
+        }
 
         setContent {
             MaterialTheme {
@@ -250,7 +254,7 @@ fun MainScreen(
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Status", style = MaterialTheme.typography.titleMedium)
-                    Text("Running: ${settings.runtimeState.isRunning}")
+                    Text("State: ${settings.runtimeState.state}")
                     if (settings.runtimeState.lastError.isNotBlank()) {
                         Text("Error: ${settings.runtimeState.lastError}", color = MaterialTheme.colorScheme.error)
                     }
@@ -262,8 +266,19 @@ fun MainScreen(
                         Text(settings.runtimeState.actualDiskPath, style = MaterialTheme.typography.bodySmall)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onStartVm, enabled = !settings.runtimeState.isRunning) { Text("Start VM") }
-                        Button(onClick = onStopVm, enabled = settings.runtimeState.isRunning) { Text("Stop VM") }
+                        Button(
+                            onClick = onStartVm,
+                            enabled = settings.runtimeState.state == VmState.Idle
+                        ) { Text("Start VM") }
+                        Button(
+                            onClick = onStopVm,
+                            enabled = settings.runtimeState.state in setOf(
+                                VmState.PreparingDisk,
+                                VmState.PreparingFirmware,
+                                VmState.Starting,
+                                VmState.Running
+                            )
+                        ) { Text("Stop VM") }
                     }
                 }
             }

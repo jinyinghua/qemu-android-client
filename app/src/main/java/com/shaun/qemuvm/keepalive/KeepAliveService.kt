@@ -20,14 +20,18 @@ import com.shaun.qemuvm.MainActivity
 import com.shaun.qemuvm.R
 import com.shaun.qemuvm.app.QemuVmApplication
 import com.shaun.qemuvm.data.VmRuntimeState
+import com.shaun.qemuvm.data.VmState
 import com.shaun.qemuvm.qemu.QemuCommandBuilder
 import com.shaun.qemuvm.util.DiskPreparer
 import com.shaun.qemuvm.util.NativeBinaryLocator
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
@@ -40,6 +44,7 @@ class KeepAliveService : LifecycleService() {
     private var process: Process? = null
     private var overlayView: View? = null
     private var windowManager: WindowManager? = null
+    private val startStopMutex = Mutex()
     @Volatile private var stoppingRequested = false
 
     override fun onCreate() {
@@ -90,21 +95,25 @@ class KeepAliveService : LifecycleService() {
         }
     }
 
-    private suspend fun startVm() {
+    private suspend fun startVm() = startStopMutex.withLock {
+        if (process?.isAlive == true) return@withLock
+
         stoppingRequested = false
         val repo = (application as QemuVmApplication).settingsRepository
         val config = repo.snapshot().vmConfig
 
         if (config.diskImagePath.isBlank() && config.installMediaPath.isBlank()) {
-            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Disk image path or install media path missing") }
+            updateRuntimeStateSafely { it.copy(state = VmState.Failed, lastError = "Disk image path or install media path missing") }
             stopSelf()
             return
         }
         if (config.firmwarePath.isBlank()) {
-            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Firmware path missing") }
+            updateRuntimeStateSafely { it.copy(state = VmState.Failed, lastError = "Firmware path missing") }
             stopSelf()
             return
         }
+
+        updateRuntimeStateSafely { it.copy(state = VmState.PreparingDisk) }
 
         // ========== Step 1: 磁盘导入 + 预分配 ==========
         val preparer = DiskPreparer(this)
@@ -123,10 +132,12 @@ class KeepAliveService : LifecycleService() {
         collectFileIssue(config.installMediaPath, "install media", inaccessible)
         collectFileIssue(config.firmwarePath, "firmware", inaccessible)
         if (inaccessible.isNotEmpty()) {
-            updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "Cannot access:\n${inaccessible.joinToString("\n")}") }
+            updateRuntimeStateSafely { it.copy(state = VmState.Failed, lastError = "Cannot access:\n${inaccessible.joinToString("\n")}") }
             stopSelf()
             return
         }
+
+        updateRuntimeStateSafely { it.copy(state = VmState.PreparingFirmware) }
 
         // ========== Step 2: 构建 QEMU 命令（用实际的磁盘路径） ==========
         val qemuBin = NativeBinaryLocator.resolveExecutable(this, config.qemuBinaryName)
@@ -148,7 +159,7 @@ class KeepAliveService : LifecycleService() {
 
         updateRuntimeStateSafely {
             it.copy(
-                isRunning = true,
+                state = VmState.Starting,
                 lastCommandLine = args.joinToString(" "),
                 lastError = "",
                 actualDiskPath = actualDiskPath
@@ -162,24 +173,39 @@ class KeepAliveService : LifecycleService() {
             NativeBinaryLocator.configureEnvironment(this, pb)
             pb.redirectErrorStream(true)
             process = pb.start()
+            updateRuntimeStateSafely { it.copy(state = VmState.Running) }
             val currentProcess = process
-            val output = withContext(Dispatchers.IO) { currentProcess?.inputStream?.bufferedReader()?.readText() ?: "" }
+            val outputBuffer = StringBuilder()
+
+            val logJob = CoroutineScope(Dispatchers.IO).launch {
+                currentProcess?.inputStream
+                    ?.bufferedReader()
+                    ?.forEachLine { line ->
+                        synchronized(outputBuffer) {
+                            outputBuffer.appendLine(line)
+                        }
+                    }
+            }
+
             val exitCode = currentProcess?.waitFor() ?: -1
+            logJob.cancel()
             process = null
+
+            val output = synchronized(outputBuffer) { outputBuffer.toString() }
 
             val error = if (exitCode != 0) {
                 val trimmed = output.trim()
                 if (trimmed.isNotBlank()) trimmed.lines().takeLast(20).joinToString("\n") else "QEMU exited with code $exitCode (no output)"
             } else ""
 
-            updateRuntimeStateSafely { it.copy(isRunning = false, lastExitCode = exitCode, lastError = error) }
+            updateRuntimeStateSafely { it.copy(state = if (exitCode == 0) VmState.Idle else VmState.Failed, lastExitCode = exitCode, lastError = error) }
         } catch (e: Exception) {
             process = null
             val msg = e.message ?: "Unknown error"
             if (stoppingRequested && msg.contains("interrupted", ignoreCase = true)) {
-                updateRuntimeStateSafely { it.copy(isRunning = false, lastError = "") }
+                updateRuntimeStateSafely { it.copy(state = VmState.Idle, lastError = "") }
             } else {
-                updateRuntimeStateSafely { it.copy(isRunning = false, lastError = msg) }
+                updateRuntimeStateSafely { it.copy(state = VmState.Failed, lastError = msg) }
             }
         } finally {
             withContext(Dispatchers.Main) { hideEdgeOverlay() }
@@ -462,7 +488,7 @@ class KeepAliveService : LifecycleService() {
             runBlocking(Dispatchers.IO) {
                 val repo = (application as QemuVmApplication).settingsRepository
                 repo.updateRuntimeState {
-                    it.copy(isRunning = false, lastExitCode = exitCode ?: it.lastExitCode, lastError = if (stoppingRequested) "" else it.lastError)
+                    it.copy(state = VmState.Idle, lastExitCode = exitCode ?: it.lastExitCode, lastError = if (stoppingRequested) "" else it.lastError)
                 }
             }
         }

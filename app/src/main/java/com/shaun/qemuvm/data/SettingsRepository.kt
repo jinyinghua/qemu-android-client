@@ -33,7 +33,9 @@ class SettingsRepository(private val context: Context) {
                 copyToPrivateDir = prefs[KEY_COPY_TO_PRIVATE] ?: true
             ),
             runtimeState = VmRuntimeState(
-                isRunning = prefs[KEY_IS_RUNNING] ?: false,
+                state = runCatching {
+                    VmState.valueOf(prefs[KEY_VM_STATE] ?: VmState.Idle.name)
+                }.getOrDefault(VmState.Idle),
                 lastExitCode = prefs[KEY_LAST_EXIT_CODE],
                 lastError = prefs[KEY_LAST_ERROR] ?: "",
                 lastCommandLine = prefs[KEY_LAST_COMMAND] ?: "",
@@ -70,7 +72,7 @@ class SettingsRepository(private val context: Context) {
         val current = snapshot().runtimeState
         val updated = transform(current)
         context.dataStore.edit { prefs ->
-            prefs[KEY_IS_RUNNING] = updated.isRunning
+            prefs[KEY_VM_STATE] = updated.state.name
             if (updated.lastExitCode == null) {
                 prefs.remove(KEY_LAST_EXIT_CODE)
             } else {
@@ -104,7 +106,7 @@ class SettingsRepository(private val context: Context) {
         private val KEY_EDGE_OVERLAY = booleanPreferencesKey("edge_overlay")
         private val KEY_HIDE_FROM_RECENTS = booleanPreferencesKey("hide_from_recents")
         private val KEY_COPY_TO_PRIVATE = booleanPreferencesKey("copy_to_private")
-        private val KEY_IS_RUNNING = booleanPreferencesKey("is_running")
+        private val KEY_VM_STATE = stringPreferencesKey("vm_state")
         private val KEY_LAST_EXIT_CODE = intPreferencesKey("last_exit_code")
         private val KEY_LAST_ERROR = stringPreferencesKey("last_error")
         private val KEY_LAST_COMMAND = stringPreferencesKey("last_command")
